@@ -1,0 +1,102 @@
+# Gardener Simulator Configuration
+# This file configures the simulated Gardener environment
+
+port: 8443
+certDir: ./certs
+kubeconfigTTL: 24h
+
+# Projects and their shoots
+projects:
+  - name: production
+    namespace: garden-production
+    shoots:
+      - name: prod-cluster-1
+        seedName: aws-eu1
+        cloudType: aws
+        status: Healthy
+        labels:
+          environment: prod
+          team: platform
+          region: eu-west-1
+      
+      - name: prod-cluster-2
+        seedName: gcp-us1
+        cloudType: gcp
+        status: Healthy
+        labels:
+          environment: prod
+          team: data
+          region: us-central1
+      
+      - name: prod-cluster-3
+        seedName: azure-eu1
+        cloudType: azure
+        status: Healthy
+        labels:
+          environment: prod
+          team: web
+          region: westeurope
+
+  - name: staging
+    namespace: garden-staging
+    shoots:
+      - name: staging-app
+        seedName: aws-eu1
+        cloudType: aws
+        status: Healthy
+        labels:
+          environment: staging
+          team: platform
+      
+      - name: staging-data
+        seedName: gcp-us1
+        cloudType: gcp
+        status: Progressing
+        labels:
+          environment: staging
+          team: data
+
+  - name: development
+    namespace: garden-development
+    shoots:
+      - name: dev-sandbox
+        seedName: aws-eu1
+        cloudType: aws
+        status: Healthy
+        labels:
+          environment: dev
+          team: platform
+          purpose: testing
+
+# Error injection settings for testing
+# All rates default to 0 (disabled). Set values between 0.0 and 1.0 to enable.
+errorInjection:
+  enabled: false
+
+  # Per-operation error rates (0.0 to 1.0)
+  # Controls probability of error for each API operation
+  listShootsErrorRate: 0.0       # List shoots API
+  getShootErrorRate: 0.0         # Get single shoot API
+  adminKubeconfigErrorRate: 0.0  # Admin kubeconfig generation
+
+  # Error type distribution (should sum to <= 1.0)
+  # When an error occurs, these control which HTTP status is returned
+  authFailureRate: 0.0      # 401 Unauthorized
+  forbiddenRate: 0.0        # 403 Forbidden
+  notFoundRate: 0.0         # 404 Not Found
+  serverErrorRate: 0.0      # 500 Internal Server Error
+  timeoutRate: 0.0          # 504 Gateway Timeout
+  rateLimitRate: 0.0        # 429 Too Many Requests (for testing backoff)
+
+  # Special response modes
+  invalidKubeconfigRate: 0.0  # Return malformed kubeconfig (for validation testing)
+
+  # Latency injection (milliseconds)
+  # Adds artificial delay to all requests
+  minLatencyMs: 0           # Minimum delay
+  maxLatencyMs: 0           # Maximum delay (random between min/max)
+
+  # Per-shoot failure injection (via management API)
+  # Use /management/shoots/{ns}/{name}/fail to configure specific shoots to always fail
+  failingShoots: {}         # Map of "namespace/name" -> errorCode
+

@@ -1,0 +1,52 @@
+# Default values for gardener-simulator
+
+replicaCount: 1
+
+image:
+  repository: pure-artifactory.dev.purestorage.com/px-docker-dev-virtual/users/yassharma/gardener-sim
+  tag: latest
+  pullPolicy: Always
+
+# Simulator configuration
+simulator:
+  port: 8443
+  certDir: /app/certs
+  projects: 1
+  shoots: 10
+
+service:
+  type: NodePort  # NodePort, ClusterIP, or LoadBalancer
+  apiPort: 8443
+  managementPort: 8444
+  apiNodePort: 32443
+  managementNodePort: 32444
+
+resources:
+  requests:
+    memory: "64Mi"
+    cpu: "100m"
+  limits:
+    memory: "256Mi"
+    cpu: "500m"
+
+# Health check configuration
+healthCheck:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readiness:
+    initialDelaySeconds: 3
+    periodSeconds: 5
+
+# Pod annotations
+podAnnotations: {}
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+

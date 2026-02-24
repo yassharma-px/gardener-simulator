@@ -1,0 +1,24 @@
+Gardener Simulator has been deployed!
+
+1. Get the kubeconfig to access the simulator:
+
+   curl http://<node-ip>:{{ .Values.service.managementNodePort }}/management/kubeconfig > kubeconfig.yaml
+
+2. Use kubectl with the kubeconfig:
+
+   kubectl --kubeconfig=kubeconfig.yaml get shoots -n garden-project
+
+3. Access the Management API:
+
+   # Get status
+   curl http://<node-ip>:{{ .Values.service.managementNodePort }}/management/status
+
+   # Add a shoot
+   curl -X POST http://<node-ip>:{{ .Values.service.managementNodePort }}/management/shoots \
+     -H "Content-Type: application/json" \
+     -d '{"namespace":"garden-project","name":"new-cluster","cloudType":"aws"}'
+
+4. Service endpoints:
+   - Gardener API: https://<node-ip>:{{ .Values.service.apiNodePort }}
+   - Management API: http://<node-ip>:{{ .Values.service.managementNodePort }}/management/
+

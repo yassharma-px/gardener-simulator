@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gardener-simulator
+  labels:
+    app: gardener-simulator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gardener-simulator
+  template:
+    metadata:
+      labels:
+        app: gardener-simulator
+    spec:
+      containers:
+        - name: gardener-simulator
+          image: pure-artifactory.dev.purestorage.com/px-docker-dev-virtual/users/yassharma/gardener-sim:latest
+          imagePullPolicy: Always
+          ports:
+            - name: api
+              containerPort: 8443
+              protocol: TCP
+            - name: management
+              containerPort: 8444
+              protocol: TCP
+          args:
+            - "--port"
+            - "8443"
+            - "--cert-dir"
+            - "/app/certs"
+            - "--projects"
+            - "2"
+            - "--shoots"
+            - "10"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: management
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: management
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: certs
+              mountPath: /app/certs
+      volumes:
+        - name: certs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gardener-simulator
+  labels:
+    app: gardener-simulator
+spec:
+  type: NodePort
+  selector:
+    app: gardener-simulator
+  ports:
+    - name: api
+      port: 8443
+      targetPort: 8443
+      nodePort: 32443
+      protocol: TCP
+    - name: management
+      port: 8444
+      targetPort: 8444
+      nodePort: 32444
+      protocol: TCP
+
