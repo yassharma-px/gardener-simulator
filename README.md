@@ -13,7 +13,6 @@ The Gardener Simulator implements the `core.gardener.cloud/v1beta1` API, enablin
 - **Develop offline** - Build and test Gardener integrations without cluster access
 - **Scale testing** - Simulate hundreds of shoots across multiple projects
 - **Chaos engineering** - Inject errors, latency, and failures for resilience testing
-- **CI/CD pipelines** - Run integration tests in isolated environments
 
 ## Quick Start
 
