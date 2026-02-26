@@ -477,11 +477,8 @@ func (s *Server) startManagementAPI(port int) {
 		_ = server.Shutdown(context.Background())
 	}()
 
-	certFile := filepath.Join(s.certDir, "tls.crt")
-	keyFile := filepath.Join(s.certDir, "tls.key")
-
-	log.Printf("Management API listening on https://localhost:%d/management/", port)
-	if err := server.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+	log.Printf("Management API listening on http://localhost:%d/management/", port)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("Management server error: %v", err)
 	}
 }
