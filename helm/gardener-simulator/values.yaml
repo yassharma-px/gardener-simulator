@@ -10,7 +10,6 @@ image:
 # Simulator configuration
 simulator:
   port: 8443
-  certDir: /app/certs
   projects: 1
   shoots: 10
 

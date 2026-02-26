@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yassharma/gardener-simulator/pkg/server"
+	"github.com/yassharma/gardener-simulator/pkg/envtest"
 	"github.com/yassharma/gardener-simulator/pkg/types"
 	"gopkg.in/yaml.v3"
 )
@@ -18,7 +18,6 @@ import (
 func main() {
 	configFile := flag.String("config", "", "Path to configuration file")
 	port := flag.Int("port", 8443, "Server port")
-	certDir := flag.String("cert-dir", "./certs", "Directory for certificates")
 	numShoots := flag.Int("shoots", 10, "Number of shoots to generate per project")
 	numProjects := flag.Int("projects", 1, "Number of projects to generate")
 	flag.Parse()
@@ -41,12 +40,9 @@ func main() {
 	}
 
 	config.Port = *port
-	config.CertDir = *certDir
 
-	srv, err := server.NewServer(config)
-	if err != nil {
-		log.Fatalf("Failed to create server: %v", err)
-	}
+	log.Println("Starting Gardener Simulator...")
+	srv := envtest.NewServer(config)
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -55,15 +51,13 @@ func main() {
 	go func() {
 		<-sigChan
 		log.Println("Shutting down...")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := srv.Stop(ctx); err != nil {
+		if err := srv.Stop(); err != nil {
 			log.Printf("Error during shutdown: %v", err)
 		}
 		os.Exit(0)
 	}()
 
-	if err := srv.Start(); err != nil {
+	if err := srv.Start(context.Background()); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }

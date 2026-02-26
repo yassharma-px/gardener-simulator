@@ -1,10 +1,10 @@
 # Gardener Cluster Simulator
 
-[![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.25+-326CE5?style=flat&logo=kubernetes)](https://kubernetes.io/)
 [![Helm](https://img.shields.io/badge/Helm-3.0+-0F1689?style=flat&logo=helm)](https://helm.sh/)
 
-A lightweight simulator for the [SAP Gardener](https://gardener.cloud/) API. Test Gardener client applications, validate error handling, and simulate large-scale cluster environments without requiring a real Gardener installation.
+A simulator for the [SAP Gardener](https://gardener.cloud/) API. Test Gardener client applications, validate error handling, and simulate large-scale cluster environments without requiring a real Gardener installation.
 
 ## Overview
 
@@ -51,7 +51,7 @@ helm install gs https://github.com/yassharma-px/gardener-simulator/raw/main/helm
 ### Prerequisites
 
 - Kubernetes 1.25+ (for Helm/kubectl deployment)
-- Go 1.21+ (for local development)
+- Go 1.25+ (for local development)
 - Helm 3.0+ (for chart installation)
 
 ### Option 1: Helm Chart
@@ -109,7 +109,6 @@ make run
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port` | `8443` | HTTPS port for Gardener API |
-| `--management-port` | `8444` | HTTP port for Management API |
 | `--projects` | `1` | Number of simulated projects |
 | `--shoots` | `10` | Number of shoots per project |
 | `--config` | (none) | Path to YAML configuration file |

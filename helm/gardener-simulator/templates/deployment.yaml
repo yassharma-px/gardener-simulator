@@ -44,8 +44,6 @@ spec:
           args:
             - "--port"
             - "{{ .Values.simulator.port }}"
-            - "--cert-dir"
-            - "{{ .Values.simulator.certDir }}"
             - "--projects"
             - "{{ .Values.simulator.projects }}"
             - "--shoots"
