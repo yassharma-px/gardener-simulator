@@ -31,10 +31,10 @@ resources:
 # Health check configuration
 healthCheck:
   liveness:
-    initialDelaySeconds: 5
+    initialDelaySeconds: 30
     periodSeconds: 10
   readiness:
-    initialDelaySeconds: 3
+    initialDelaySeconds: 20
     periodSeconds: 5
 
 # Pod annotations
