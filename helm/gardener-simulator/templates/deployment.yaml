@@ -52,6 +52,16 @@ spec:
             - "--external-server"
             - "{{ .Values.simulator.externalServer }}"
             {{- end }}
+            {{- if .Values.shootKubeconfig.enabled }}
+            - "--shoot-kubeconfig"
+            - "/etc/shoot-kubeconfig/kubeconfig"
+            {{- end }}
+          {{- if .Values.shootKubeconfig.enabled }}
+          volumeMounts:
+            - name: shoot-kubeconfig
+              mountPath: /etc/shoot-kubeconfig
+              readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:
@@ -66,5 +76,11 @@ spec:
               port: management
             initialDelaySeconds: {{ .Values.healthCheck.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.healthCheck.readiness.periodSeconds }}
+      {{- if .Values.shootKubeconfig.enabled }}
+      volumes:
+        - name: shoot-kubeconfig
+          configMap:
+            name: {{ .Values.shootKubeconfig.configMapName }}
+      {{- end }}
 
 

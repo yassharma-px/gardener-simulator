@@ -15,6 +15,11 @@ type SimulatorConfig struct {
 	// If empty, defaults to "https://localhost:<port>"
 	ExternalServer string `yaml:"externalServer"`
 
+	// ShootKubeconfigPath is the path to a kubeconfig file that will be returned
+	// for all shoot kubeconfig requests. If set, this kubeconfig is used instead
+	// of generating one. This allows returning a real cluster's kubeconfig.
+	ShootKubeconfigPath string `yaml:"shootKubeconfigPath"`
+
 	// Projects to simulate
 	Projects []ProjectConfig `yaml:"projects"`
 

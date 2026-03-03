@@ -543,8 +543,18 @@ func (s *Server) handleAdminKubeconfigRequest(w http.ResponseWriter, r *http.Req
 
 // generateMockShootKubeconfig generates a mock kubeconfig for a shoot cluster.
 // In a real Gardener setup, this would be a kubeconfig to access the actual shoot cluster.
-// For the simulator, we return a kubeconfig pointing to the simulator itself.
+// For the simulator, we return either a custom kubeconfig (if configured) or one pointing to the simulator.
 func (s *Server) generateMockShootKubeconfig(namespace, shootName string) string {
+	// If a custom kubeconfig path is configured, read and return that
+	if s.config != nil && s.config.ShootKubeconfigPath != "" {
+		kubeconfig, err := os.ReadFile(s.config.ShootKubeconfigPath)
+		if err != nil {
+			log.Printf("Failed to read custom kubeconfig from %s: %v, falling back to generated kubeconfig", s.config.ShootKubeconfigPath, err)
+		} else {
+			return string(kubeconfig)
+		}
+	}
+
 	// Determine the server URL
 	serverURL := s.getExternalServerURL()
 

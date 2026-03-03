@@ -17,6 +17,16 @@ simulator:
   # If empty, defaults to "https://localhost:<port>"
   externalServer: ""
 
+# Custom kubeconfig to return for all shoot kubeconfig requests
+# If provided, this kubeconfig will be returned instead of generating one
+# Create a ConfigMap with your kubeconfig and reference it here
+shootKubeconfig:
+  # Enable custom kubeconfig
+  enabled: false
+  # Name of the ConfigMap containing the kubeconfig
+  # The ConfigMap should have a key "kubeconfig" with the kubeconfig content
+  configMapName: ""
+
 service:
   type: NodePort  # NodePort, ClusterIP, or LoadBalancer
   apiPort: 8443

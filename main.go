@@ -21,6 +21,7 @@ func main() {
 	numShoots := flag.Int("shoots", 10, "Number of shoots to generate per project")
 	numProjects := flag.Int("projects", 1, "Number of projects to generate")
 	externalServer := flag.String("external-server", "", "External server URL for kubeconfigs (e.g., https://10.0.0.1:32443)")
+	shootKubeconfig := flag.String("shoot-kubeconfig", "", "Path to kubeconfig file to return for all shoot kubeconfig requests")
 	flag.Parse()
 
 	var config *types.SimulatorConfig
@@ -43,6 +44,9 @@ func main() {
 	config.Port = *port
 	if *externalServer != "" {
 		config.ExternalServer = *externalServer
+	}
+	if *shootKubeconfig != "" {
+		config.ShootKubeconfigPath = *shootKubeconfig
 	}
 
 	log.Println("Starting Gardener Simulator...")
