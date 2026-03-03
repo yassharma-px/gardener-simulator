@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	mrand "math/rand"
@@ -21,6 +22,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -363,8 +366,8 @@ func (s *Server) startProxy(ctx context.Context) {
 		},
 	}
 
-	// Wrap with error injection
-	handler := s.errorInjectionMiddleware(proxy)
+	// Wrap with adminkubeconfig handler, then error injection
+	handler := s.errorInjectionMiddleware(s.adminKubeconfigMiddleware(proxy))
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -456,6 +459,134 @@ func (s *Server) writeErrorResponse(w http.ResponseWriter, statusCode int, messa
 		"code":       statusCode,
 	}
 	json.NewEncoder(w).Encode(errResp)
+}
+
+// adminKubeconfigMiddleware intercepts AdminKubeconfigRequest subresource calls and returns mock kubeconfigs.
+// Pattern: POST /apis/core.gardener.cloud/v1beta1/namespaces/{namespace}/shoots/{shootName}/adminkubeconfig
+var adminKubeconfigPattern = regexp.MustCompile(`^/apis/core\.gardener\.cloud/v1beta1/namespaces/([^/]+)/shoots/([^/]+)/adminkubeconfig$`)
+
+func (s *Server) adminKubeconfigMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			matches := adminKubeconfigPattern.FindStringSubmatch(r.URL.Path)
+			if matches != nil {
+				namespace := matches[1]
+				shootName := matches[2]
+				s.handleAdminKubeconfigRequest(w, r, namespace, shootName)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// handleAdminKubeconfigRequest handles the AdminKubeconfigRequest subresource.
+func (s *Server) handleAdminKubeconfigRequest(w http.ResponseWriter, r *http.Request, namespace, shootName string) {
+	// Read the request body (AdminKubeconfigRequest)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	defer r.Body.Close()
+
+	// Parse the request to get expiration seconds
+	var req struct {
+		Spec struct {
+			ExpirationSeconds *int64 `json:"expirationSeconds"`
+		} `json:"spec"`
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			log.Printf("Failed to parse AdminKubeconfigRequest: %v", err)
+		}
+	}
+
+	expiration := int64(3600) // Default 1 hour
+	if req.Spec.ExpirationSeconds != nil {
+		expiration = *req.Spec.ExpirationSeconds
+	}
+
+	// Verify the shoot exists
+	shoot := &gardencorev1beta1.Shoot{}
+	if err := s.client.Get(context.Background(), client.ObjectKey{Namespace: namespace, Name: shootName}, shoot); err != nil {
+		s.writeErrorResponse(w, http.StatusNotFound, fmt.Sprintf("shoot %q not found in namespace %q", shootName, namespace))
+		return
+	}
+
+	// Generate a mock kubeconfig for this shoot
+	kubeconfig := s.generateMockShootKubeconfig(namespace, shootName)
+
+	// Calculate expiration timestamp
+	expirationTime := time.Now().Add(time.Duration(expiration) * time.Second)
+
+	// Build the response in Gardener's AdminKubeconfigRequest format
+	response := map[string]interface{}{
+		"apiVersion": "authentication.gardener.cloud/v1alpha1",
+		"kind":       "AdminKubeconfigRequest",
+		"metadata": map[string]interface{}{
+			"creationTimestamp": time.Now().UTC().Format(time.RFC3339),
+		},
+		"spec": map[string]interface{}{
+			"expirationSeconds": expiration,
+		},
+		"status": map[string]interface{}{
+			"kubeconfig":          base64.StdEncoding.EncodeToString([]byte(kubeconfig)),
+			"expirationTimestamp": expirationTime.UTC().Format(time.RFC3339),
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(response)
+}
+
+// generateMockShootKubeconfig generates a mock kubeconfig for a shoot cluster.
+// In a real Gardener setup, this would be a kubeconfig to access the actual shoot cluster.
+// For the simulator, we return a kubeconfig pointing to the simulator itself.
+func (s *Server) generateMockShootKubeconfig(namespace, shootName string) string {
+	// Get the proxy server's port
+	port := 8443
+	if s.config != nil && s.config.Port > 0 {
+		port = s.config.Port
+	}
+
+	// Read the CA cert from our cert dir
+	caCertPath := filepath.Join(s.certDir, "tls.crt")
+	caCertData, err := os.ReadFile(caCertPath)
+	if err != nil {
+		log.Printf("Failed to read CA cert: %v", err)
+		caCertData = []byte{}
+	}
+
+	// Build kubeconfig YAML
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\n")
+	sb.WriteString("kind: Config\n")
+	sb.WriteString("clusters:\n")
+	sb.WriteString(fmt.Sprintf("- name: %s--%s\n", namespace, shootName))
+	sb.WriteString("  cluster:\n")
+	sb.WriteString(fmt.Sprintf("    server: https://localhost:%d\n", port))
+	sb.WriteString("    insecure-skip-tls-verify: true\n")
+	sb.WriteString("contexts:\n")
+	sb.WriteString(fmt.Sprintf("- name: %s--%s\n", namespace, shootName))
+	sb.WriteString("  context:\n")
+	sb.WriteString(fmt.Sprintf("    cluster: %s--%s\n", namespace, shootName))
+	sb.WriteString(fmt.Sprintf("    user: %s--%s\n", namespace, shootName))
+	sb.WriteString(fmt.Sprintf("current-context: %s--%s\n", namespace, shootName))
+	sb.WriteString("users:\n")
+	sb.WriteString(fmt.Sprintf("- name: %s--%s\n", namespace, shootName))
+	sb.WriteString("  user:\n")
+	// Use client cert from the envtest for authentication
+	if len(s.restCfg.CertData) > 0 {
+		sb.WriteString(fmt.Sprintf("    client-certificate-data: %s\n", base64.StdEncoding.EncodeToString(s.restCfg.CertData)))
+	}
+	if len(s.restCfg.KeyData) > 0 {
+		sb.WriteString(fmt.Sprintf("    client-key-data: %s\n", base64.StdEncoding.EncodeToString(s.restCfg.KeyData)))
+	}
+	_ = caCertData // Not used currently since we use insecure-skip-tls-verify
+
+	return sb.String()
 }
 
 // startManagementAPI starts the management API server.
