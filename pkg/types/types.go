@@ -10,6 +10,11 @@ type SimulatorConfig struct {
 	Port    int    `yaml:"port"`
 	CertDir string `yaml:"certDir"`
 
+	// ExternalServer is the external server URL for kubeconfigs returned to clients.
+	// Example: "https://10.0.0.1:32443" or "https://gardener-sim.example.com:443"
+	// If empty, defaults to "https://localhost:<port>"
+	ExternalServer string `yaml:"externalServer"`
+
 	// Projects to simulate
 	Projects []ProjectConfig `yaml:"projects"`
 

@@ -48,6 +48,10 @@ spec:
             - "{{ .Values.simulator.projects }}"
             - "--shoots"
             - "{{ .Values.simulator.shoots }}"
+            {{- if .Values.simulator.externalServer }}
+            - "--external-server"
+            - "{{ .Values.simulator.externalServer }}"
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           livenessProbe:

@@ -20,6 +20,7 @@ func main() {
 	port := flag.Int("port", 8443, "Server port")
 	numShoots := flag.Int("shoots", 10, "Number of shoots to generate per project")
 	numProjects := flag.Int("projects", 1, "Number of projects to generate")
+	externalServer := flag.String("external-server", "", "External server URL for kubeconfigs (e.g., https://10.0.0.1:32443)")
 	flag.Parse()
 
 	var config *types.SimulatorConfig
@@ -40,6 +41,9 @@ func main() {
 	}
 
 	config.Port = *port
+	if *externalServer != "" {
+		config.ExternalServer = *externalServer
+	}
 
 	log.Println("Starting Gardener Simulator...")
 	srv := envtest.NewServer(config)

@@ -12,6 +12,10 @@ simulator:
   port: 8443
   projects: 1
   shoots: 10
+  # External server URL for kubeconfigs returned to clients
+  # Example: "https://10.0.0.1:32443" or "https://gardener-sim.example.com:443"
+  # If empty, defaults to "https://localhost:<port>"
+  externalServer: ""
 
 service:
   type: NodePort  # NodePort, ClusterIP, or LoadBalancer

@@ -545,19 +545,8 @@ func (s *Server) handleAdminKubeconfigRequest(w http.ResponseWriter, r *http.Req
 // In a real Gardener setup, this would be a kubeconfig to access the actual shoot cluster.
 // For the simulator, we return a kubeconfig pointing to the simulator itself.
 func (s *Server) generateMockShootKubeconfig(namespace, shootName string) string {
-	// Get the proxy server's port
-	port := 8443
-	if s.config != nil && s.config.Port > 0 {
-		port = s.config.Port
-	}
-
-	// Read the CA cert from our cert dir
-	caCertPath := filepath.Join(s.certDir, "tls.crt")
-	caCertData, err := os.ReadFile(caCertPath)
-	if err != nil {
-		log.Printf("Failed to read CA cert: %v", err)
-		caCertData = []byte{}
-	}
+	// Determine the server URL
+	serverURL := s.getExternalServerURL()
 
 	// Build kubeconfig YAML
 	var sb strings.Builder
@@ -566,7 +555,7 @@ func (s *Server) generateMockShootKubeconfig(namespace, shootName string) string
 	sb.WriteString("clusters:\n")
 	sb.WriteString(fmt.Sprintf("- name: %s--%s\n", namespace, shootName))
 	sb.WriteString("  cluster:\n")
-	sb.WriteString(fmt.Sprintf("    server: https://localhost:%d\n", port))
+	sb.WriteString(fmt.Sprintf("    server: %s\n", serverURL))
 	sb.WriteString("    insecure-skip-tls-verify: true\n")
 	sb.WriteString("contexts:\n")
 	sb.WriteString(fmt.Sprintf("- name: %s--%s\n", namespace, shootName))
@@ -584,9 +573,22 @@ func (s *Server) generateMockShootKubeconfig(namespace, shootName string) string
 	if len(s.restCfg.KeyData) > 0 {
 		sb.WriteString(fmt.Sprintf("    client-key-data: %s\n", base64.StdEncoding.EncodeToString(s.restCfg.KeyData)))
 	}
-	_ = caCertData // Not used currently since we use insecure-skip-tls-verify
 
 	return sb.String()
+}
+
+// getExternalServerURL returns the external server URL for kubeconfigs.
+// If ExternalServer is configured, use that. Otherwise, fall back to localhost.
+func (s *Server) getExternalServerURL() string {
+	if s.config != nil && s.config.ExternalServer != "" {
+		return s.config.ExternalServer
+	}
+	// Default to localhost with the configured port
+	port := 8443
+	if s.config != nil && s.config.Port > 0 {
+		port = s.config.Port
+	}
+	return fmt.Sprintf("https://localhost:%d", port)
 }
 
 // startManagementAPI starts the management API server.
