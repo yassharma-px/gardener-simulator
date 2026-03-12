@@ -25,20 +25,32 @@ type Injector struct {
 	// Per-shoot error injection
 	failingShoots map[string]int // namespace/name -> error code
 
-	// Invalid kubeconfig injection
+	// Per-ServiceAccount error injection
+	failingServiceAccounts map[string]int // namespace/name -> error code
+
+	// Kubeconfig injection settings
 	invalidKubeconfigRate float64
+	expiredKubeconfigRate float64
+	shortTTLSeconds       int64
+
+	// Per-shoot kubeconfig behavior
+	shootKubeconfigBehavior map[string]string // namespace/name -> behavior ("expired", "invalid")
 }
 
 // NewInjector creates a new error injector
 func NewInjector(cfg types.ErrorInjectionConfig) *Injector {
 	return &Injector{
-		config:                cfg,
-		enabled:               cfg.Enabled,
-		errorRates:            make(map[string]float64),
-		errorCodes:            make(map[string]int),
-		latencyMs:             make(map[string]int),
-		failingShoots:         make(map[string]int),
-		invalidKubeconfigRate: cfg.InvalidKubeconfigRate,
+		config:                  cfg,
+		enabled:                 cfg.Enabled,
+		errorRates:              make(map[string]float64),
+		errorCodes:              make(map[string]int),
+		latencyMs:               make(map[string]int),
+		failingShoots:           make(map[string]int),
+		failingServiceAccounts:  make(map[string]int),
+		invalidKubeconfigRate:   cfg.InvalidKubeconfigRate,
+		expiredKubeconfigRate:   cfg.ExpiredKubeconfigRate,
+		shortTTLSeconds:         cfg.ShortTTLSeconds,
+		shootKubeconfigBehavior: make(map[string]string),
 	}
 }
 
@@ -56,11 +68,25 @@ func (i *Injector) UpdateConfig(cfg types.ErrorInjectionConfig) {
 	i.config = cfg
 	i.enabled = cfg.Enabled
 	i.invalidKubeconfigRate = cfg.InvalidKubeconfigRate
+	i.expiredKubeconfigRate = cfg.ExpiredKubeconfigRate
+	i.shortTTLSeconds = cfg.ShortTTLSeconds
 
 	// Copy failing shoots
 	i.failingShoots = make(map[string]int)
 	for k, v := range cfg.FailingShoots {
 		i.failingShoots[k] = v
+	}
+
+	// Copy shoot kubeconfig behavior
+	i.shootKubeconfigBehavior = make(map[string]string)
+	for k, v := range cfg.ShootKubeconfigBehavior {
+		i.shootKubeconfigBehavior[k] = v
+	}
+
+	// Copy failing service accounts
+	i.failingServiceAccounts = make(map[string]int)
+	for k, v := range cfg.FailingServiceAccounts {
+		i.failingServiceAccounts[k] = v
 	}
 }
 
@@ -99,6 +125,41 @@ func (i *Injector) ShouldInjectShootError(namespace, name string) (bool, int, st
 	return false, 0, ""
 }
 
+// SetFailingServiceAccount marks a specific service account to always return an error for TokenRequest
+func (i *Injector) SetFailingServiceAccount(namespace, name string, errorCode int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	key := namespace + "/" + name
+	if errorCode == 0 {
+		delete(i.failingServiceAccounts, key)
+	} else {
+		i.failingServiceAccounts[key] = errorCode
+	}
+}
+
+// ClearFailingServiceAccounts removes all per-ServiceAccount error injections
+func (i *Injector) ClearFailingServiceAccounts() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.failingServiceAccounts = make(map[string]int)
+}
+
+// ShouldInjectServiceAccountError checks if a specific service account should always fail
+func (i *Injector) ShouldInjectServiceAccountError(namespace, name string) (bool, int, string) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if !i.enabled {
+		return false, 0, ""
+	}
+
+	key := namespace + "/" + name
+	if code, exists := i.failingServiceAccounts[key]; exists {
+		return true, code, errorMessage(code, "create token for serviceaccount "+name)
+	}
+	return false, 0, ""
+}
+
 // ShouldReturnInvalidKubeconfig checks if an invalid kubeconfig should be returned
 func (i *Injector) ShouldReturnInvalidKubeconfig() bool {
 	i.mu.RLock()
@@ -115,6 +176,72 @@ func (i *Injector) SetInvalidKubeconfigRate(rate float64) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.invalidKubeconfigRate = rate
+}
+
+// ShouldReturnExpiredKubeconfig checks if an expired kubeconfig should be returned
+func (i *Injector) ShouldReturnExpiredKubeconfig() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if !i.enabled || i.expiredKubeconfigRate == 0 {
+		return false
+	}
+	return rand.Float64() < i.expiredKubeconfigRate
+}
+
+// SetExpiredKubeconfigRate sets the rate for returning expired kubeconfigs
+func (i *Injector) SetExpiredKubeconfigRate(rate float64) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.expiredKubeconfigRate = rate
+}
+
+// GetShortTTLSeconds returns the TTL override value (0 means no override)
+func (i *Injector) GetShortTTLSeconds() int64 {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.shortTTLSeconds
+}
+
+// SetShortTTLSeconds sets the TTL override value for testing rapid refresh
+func (i *Injector) SetShortTTLSeconds(seconds int64) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.shortTTLSeconds = seconds
+}
+
+// SetShootKubeconfigBehavior sets specific kubeconfig behavior for a shoot
+// behavior can be: "expired" (return already-expired), "invalid" (return malformed), "" (clear)
+func (i *Injector) SetShootKubeconfigBehavior(namespace, name, behavior string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	key := namespace + "/" + name
+	if behavior == "" {
+		delete(i.shootKubeconfigBehavior, key)
+	} else {
+		i.shootKubeconfigBehavior[key] = behavior
+	}
+}
+
+// GetShootKubeconfigBehavior returns the kubeconfig behavior for a specific shoot
+// Returns: "expired", "invalid", or "" (normal)
+func (i *Injector) GetShootKubeconfigBehavior(namespace, name string) string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if !i.enabled {
+		return ""
+	}
+
+	key := namespace + "/" + name
+	return i.shootKubeconfigBehavior[key]
+}
+
+// ClearShootKubeconfigBehaviors removes all per-shoot kubeconfig behaviors
+func (i *Injector) ClearShootKubeconfigBehaviors() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.shootKubeconfigBehavior = make(map[string]string)
 }
 
 // UpdateSimpleConfig updates the simplified error injection configuration
@@ -152,6 +279,8 @@ func normalizeOperation(op string) string {
 		return "ListShoots"
 	case "getshoot", "get_shoot":
 		return "GetShoot"
+	case "tokenrequest", "token_request":
+		return "TokenRequest"
 	default:
 		return op
 	}
@@ -217,6 +346,8 @@ func (i *Injector) ShouldInjectError(operation string) (bool, int, string) {
 		rate = i.config.GetShootErrorRate
 	case "AdminKubeconfig":
 		rate = i.config.AdminKubeconfigErrorRate
+	case "TokenRequest":
+		rate = i.config.TokenRequestErrorRate
 	default:
 		return false, 0, ""
 	}
@@ -277,6 +408,12 @@ func (i *Injector) selectErrorType() (bool, int, string) {
 	cumulative += i.config.ServerErrorRate
 	if r < cumulative {
 		return true, http.StatusInternalServerError, "Internal Server Error: temporary failure"
+	}
+
+	// Check service unavailable (503)
+	cumulative += i.config.ServiceUnavailableRate
+	if r < cumulative {
+		return true, http.StatusServiceUnavailable, "Service Unavailable: server is temporarily unavailable"
 	}
 
 	// Check timeout (we'll simulate this with a long delay)

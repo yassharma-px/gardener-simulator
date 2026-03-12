@@ -19,7 +19,7 @@ The Gardener Simulator implements the `core.gardener.cloud/v1beta1` API, enablin
 ### Helm (Recommended)
 
 ```bash
-helm install gs https://github.com/yassharma-px/gardener-simulator/raw/main/helm/gardener-simulator-0.1.0.tgz
+helm install gs https://github.com/yassharma-px/gardener-simulator/raw/main/helm/gardener-simulator-0.2.0.tgz
 ```
 
 By default, the simulator creates **1 project** with **10 shoots**. Projects are named `project-0`, `project-1`, etc. Shoots are named `shoot-0`, `shoot-1`, etc.
@@ -38,7 +38,7 @@ kubectl --kubeconfig=kubeconfig.yaml get shoots --all-namespaces
 
 ```bash
 # Large-scale simulation: 10 projects × 50 shoots = 500 clusters
-helm install gs https://github.com/yassharma-px/gardener-simulator/raw/main/helm/gardener-simulator-0.1.0.tgz \
+helm install gs https://github.com/yassharma-px/gardener-simulator/raw/main/helm/gardener-simulator-0.2.0.tgz \
   --namespace gardener-sim \
   --create-namespace \
   --set simulator.projects=10 \
@@ -57,7 +57,7 @@ helm install gs https://github.com/yassharma-px/gardener-simulator/raw/main/helm
 
 ```bash
 # Basic installation
-helm install gs https://github.com/yassharma-px/gardener-simulator/raw/main/helm/gardener-simulator-0.1.0.tgz
+helm install gs https://github.com/yassharma-px/gardener-simulator/raw/main/helm/gardener-simulator-0.2.0.tgz
 
 # Uninstall
 helm uninstall gs
@@ -140,21 +140,32 @@ For complex scenarios, use a YAML configuration file. See [`examples/config.yaml
 | `/apis/core.gardener.cloud/v1beta1/projects` | GET | List all projects |
 | `/apis/core.gardener.cloud/v1beta1/projects/{name}` | GET | Get project details |
 
+### Kubernetes Core API (HTTPS)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/namespaces/{ns}/serviceaccounts/{name}/token` | POST | Create ServiceAccount token (TokenRequest API) |
+
 ### Management API (HTTP)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/management/kubeconfig` | GET | Download simulator kubeconfig |
+| `/management/kubeconfig/serviceaccount/{ns}/{name}` | GET | Get kubeconfig with ServiceAccount token |
 | `/management/shoots` | POST | Create a new shoot |
 | `/management/shoots/{ns}/{name}` | DELETE | Delete a shoot |
 | `/management/shoots/{ns}/{name}/status` | PUT | Update shoot status (Healthy/Unhealthy/Hibernated) |
 | `/management/shoots/{ns}/{name}/fail` | POST | Configure shoot to always fail with specific error |
+| `/management/serviceaccounts/{ns}/{name}/fail` | POST | Configure ServiceAccount TokenRequest to always fail |
 | `/management/errors` | PUT | Configure error injection |
 | `/management/errors` | GET | Get current error configuration |
 | `/management/errors/enable` | POST | Enable error injection |
 | `/management/errors/disable` | POST | Disable error injection |
 | `/management/errors/failing-shoots` | DELETE | Clear all per-shoot failure injections |
+| `/management/errors/failing-serviceaccounts` | DELETE | Clear all per-ServiceAccount failure injections |
 | `/management/errors/invalid-kubeconfig` | POST | Set invalid kubeconfig return rate |
+| `/management/errors/expired-kubeconfig` | POST | Set expired kubeconfig/token return rate |
+| `/management/errors/short-ttl` | POST | Set short TTL for tokens (rapid refresh testing) |
 | `/management/status` | GET | Get simulator status |
 | `/healthz` | GET | Health check (for K8s probes) |
 
@@ -418,7 +429,39 @@ curl -X PUT http://localhost:8444/management/errors \
 
 **Result:** 50% of list operations return `429 Too Many Requests`.
 
-#### Example 7: Per-Shoot Failure Injection
+#### Example 7: 429 Rate Limiting for Admin Kubeconfig Requests
+
+Test your application's retry/backoff logic specifically for admin kubeconfig (credential) requests:
+
+```bash
+# 50% of admin kubeconfig requests return 429
+curl -X PUT http://localhost:8444/management/errors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": true,
+    "adminKubeconfigErrorRate": 0.5,
+    "rateLimitRate": 1.0
+  }'
+```
+
+**Result:** 50% of `POST .../shoots/{name}/adminkubeconfig` requests return `429 Too Many Requests`.
+
+For more aggressive testing (100% failure rate):
+
+```bash
+# All admin kubeconfig requests return 429
+curl -X PUT http://localhost:8444/management/errors \
+  -H "Content-Type: application/json" \
+  -d '{
+    "enabled": true,
+    "adminKubeconfigErrorRate": 1.0,
+    "rateLimitRate": 1.0
+  }'
+```
+
+**Result:** Every admin kubeconfig request fails with `429 Too Many Requests`, useful for testing circuit breaker patterns.
+
+#### Example 8: Per-Shoot Failure Injection
 
 Make a specific shoot always fail (useful for testing partial failure handling):
 
@@ -437,7 +480,7 @@ curl -X POST http://localhost:8444/management/shoots/garden-production/my-cluste
 curl -X DELETE http://localhost:8444/management/errors/failing-shoots
 ```
 
-#### Example 8: Invalid Kubeconfig Response (Test Validation)
+#### Example 9: Invalid Kubeconfig Response (Test Validation)
 
 Test how your application handles malformed kubeconfig responses:
 
@@ -448,7 +491,7 @@ curl -X POST http://localhost:8444/management/errors/invalid-kubeconfig \
   -d '{"rate": 0.3}'
 ```
 
-#### Example 9: Dynamic Shoot Status Updates
+#### Example 10: Dynamic Shoot Status Updates
 
 Change shoot status to test status monitoring logic:
 
@@ -483,6 +526,72 @@ curl http://localhost:8444/management/errors
 
 # Get simulator status including error config
 curl http://localhost:8444/management/status
+```
+
+## Token Update Worker Testing
+
+The simulator supports testing scenarios for Gardener Token Update Workers that refresh ServiceAccount tokens and kubeconfigs.
+
+### Get Kubeconfig with ServiceAccount Token
+
+```bash
+# Get a kubeconfig using a ServiceAccount token
+curl "http://localhost:8444/management/kubeconfig/serviceaccount/garden/my-sa"
+
+# With custom expiration (seconds)
+curl "http://localhost:8444/management/kubeconfig/serviceaccount/garden/my-sa?expirationSeconds=600"
+
+# With custom server URL
+curl "http://localhost:8444/management/kubeconfig/serviceaccount/garden/my-sa?server=https://gardener.example.com:443"
+```
+
+### TokenRequest API (Standard Kubernetes)
+
+```bash
+# Create a token for a ServiceAccount (like kubectl create token)
+curl -X POST "https://localhost:8443/api/v1/namespaces/garden/serviceaccounts/my-sa/token" \
+  -H "Content-Type: application/json" \
+  -k \
+  -d '{"spec":{"expirationSeconds":3600}}'
+```
+
+### Token Refresh Error Scenarios
+
+```bash
+# Make TokenRequest fail for a specific ServiceAccount
+curl -X POST "http://localhost:8444/management/serviceaccounts/garden/my-sa/fail" \
+  -d '{"errorCode": 403}'
+
+# Clear per-ServiceAccount failure
+curl -X POST "http://localhost:8444/management/serviceaccounts/garden/my-sa/fail" \
+  -d '{"errorCode": 0}'
+
+# Clear ALL ServiceAccount failure injections
+curl -X DELETE "http://localhost:8444/management/errors/failing-serviceaccounts"
+
+# Configure random TokenRequest failures (30% failure rate)
+curl -X PUT "http://localhost:8444/management/errors" \
+  -d '{"enabled": true, "tokenRequestErrorRate": 0.3, "rateLimitRate": 1.0}'
+```
+
+### Short-Lived Tokens (Rapid Refresh Testing)
+
+```bash
+# Set short TTL for all tokens (10 seconds)
+curl -X POST "http://localhost:8444/management/errors/short-ttl" \
+  -d '{"seconds": 10}'
+
+# Clear short TTL override
+curl -X POST "http://localhost:8444/management/errors/short-ttl" \
+  -d '{"seconds": 0}'
+```
+
+### Expired Token Injection
+
+```bash
+# 50% of tokens/kubeconfigs return already-expired
+curl -X POST "http://localhost:8444/management/errors/expired-kubeconfig" \
+  -d '{"rate": 0.5}'
 ```
 
 ## Development

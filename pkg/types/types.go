@@ -66,17 +66,24 @@ type ErrorInjectionConfig struct {
 	ListShootsErrorRate      float64 `yaml:"listShootsErrorRate" json:"listShootsErrorRate"` // 0.0-1.0
 	GetShootErrorRate        float64 `yaml:"getShootErrorRate" json:"getShootErrorRate"`
 	AdminKubeconfigErrorRate float64 `yaml:"adminKubeconfigErrorRate" json:"adminKubeconfigErrorRate"`
+	TokenRequestErrorRate    float64 `yaml:"tokenRequestErrorRate" json:"tokenRequestErrorRate"` // ServiceAccount TokenRequest errors
 
 	// Specific error types
-	AuthFailureRate float64 `yaml:"authFailureRate" json:"authFailureRate"` // 401 errors
-	ForbiddenRate   float64 `yaml:"forbiddenRate" json:"forbiddenRate"`     // 403 errors
-	NotFoundRate    float64 `yaml:"notFoundRate" json:"notFoundRate"`       // 404 errors
-	ServerErrorRate float64 `yaml:"serverErrorRate" json:"serverErrorRate"` // 500 errors
-	TimeoutRate     float64 `yaml:"timeoutRate" json:"timeoutRate"`         // 504 errors
-	RateLimitRate   float64 `yaml:"rateLimitRate" json:"rateLimitRate"`     // 429 errors
+	AuthFailureRate         float64 `yaml:"authFailureRate" json:"authFailureRate"`                 // 401 errors
+	ForbiddenRate           float64 `yaml:"forbiddenRate" json:"forbiddenRate"`                     // 403 errors
+	NotFoundRate            float64 `yaml:"notFoundRate" json:"notFoundRate"`                       // 404 errors
+	ServerErrorRate         float64 `yaml:"serverErrorRate" json:"serverErrorRate"`                 // 500 errors
+	ServiceUnavailableRate  float64 `yaml:"serviceUnavailableRate" json:"serviceUnavailableRate"`   // 503 errors
+	TimeoutRate             float64 `yaml:"timeoutRate" json:"timeoutRate"`                         // 504 errors
+	RateLimitRate           float64 `yaml:"rateLimitRate" json:"rateLimitRate"`                     // 429 errors
 
-	// Special response modes
+	// Special response modes for kubeconfig testing
 	InvalidKubeconfigRate float64 `yaml:"invalidKubeconfigRate" json:"invalidKubeconfigRate"` // Return malformed kubeconfig
+	ExpiredKubeconfigRate float64 `yaml:"expiredKubeconfigRate" json:"expiredKubeconfigRate"` // Return already-expired kubeconfig
+
+	// TTL override for testing rapid refresh scenarios
+	// When > 0, overrides the requested TTL with this value (in seconds)
+	ShortTTLSeconds int64 `yaml:"shortTTLSeconds" json:"shortTTLSeconds"`
 
 	// Latency injection (in milliseconds)
 	MinLatencyMs int `yaml:"minLatencyMs" json:"minLatencyMs"`
@@ -84,6 +91,13 @@ type ErrorInjectionConfig struct {
 
 	// Per-shoot error injection (namespace/name -> always fail)
 	FailingShoots map[string]int `yaml:"failingShoots" json:"failingShoots"` // shoot key -> error code
+
+	// Per-shoot kubeconfig behavior (namespace/name -> behavior)
+	// Values: "expired" (return expired kubeconfig), "invalid" (return malformed kubeconfig)
+	ShootKubeconfigBehavior map[string]string `yaml:"shootKubeconfigBehavior" json:"shootKubeconfigBehavior"`
+
+	// Per-ServiceAccount error injection (namespace/name -> error code)
+	FailingServiceAccounts map[string]int `yaml:"failingServiceAccounts" json:"failingServiceAccounts"`
 }
 
 // Shoot represents a Gardener Shoot CR
@@ -180,4 +194,30 @@ type AdminKubeconfigResponse struct {
 type AdminKubeconfigResponseStatus struct {
 	Kubeconfig          string `json:"kubeconfig"`
 	ExpirationTimestamp string `json:"expirationTimestamp"`
+}
+
+// TokenRequest represents a Kubernetes TokenRequest for ServiceAccount tokens
+// This matches the authentication.k8s.io/v1 TokenRequest resource
+type TokenRequest struct {
+	APIVersion string           `json:"apiVersion"`
+	Kind       string           `json:"kind"`
+	Spec       TokenRequestSpec `json:"spec"`
+}
+
+// TokenRequestSpec contains the specification for a token request
+type TokenRequestSpec struct {
+	// Audiences are the intendend audiences of the token
+	Audiences []string `json:"audiences,omitempty"`
+	// ExpirationSeconds is the requested duration of validity of the token
+	ExpirationSeconds *int64 `json:"expirationSeconds,omitempty"`
+	// BoundObjectRef is a reference to an object that the token will be bound to
+	BoundObjectRef *BoundObjectReference `json:"boundObjectRef,omitempty"`
+}
+
+// BoundObjectReference is a reference to an object that a token is bound to
+type BoundObjectReference struct {
+	Kind       string `json:"kind,omitempty"`
+	APIVersion string `json:"apiVersion,omitempty"`
+	Name       string `json:"name,omitempty"`
+	UID        string `json:"uid,omitempty"`
 }

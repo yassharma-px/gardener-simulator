@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yassharma/gardener-simulator/pkg/errors"
 	"github.com/yassharma/gardener-simulator/pkg/store"
@@ -74,10 +77,24 @@ func (h *ManagementHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleClearFailingShoots(w, r)
 	case path == "/errors/invalid-kubeconfig" && r.Method == http.MethodPost:
 		h.handleSetInvalidKubeconfig(w, r)
+	case path == "/errors/expired-kubeconfig" && r.Method == http.MethodPost:
+		h.handleSetExpiredKubeconfig(w, r)
+	case path == "/errors/short-ttl" && r.Method == http.MethodPost:
+		h.handleSetShortTTL(w, r)
+	case strings.HasPrefix(path, "/shoots/") && strings.HasSuffix(path, "/kubeconfig-behavior") && r.Method == http.MethodPost:
+		h.handleSetShootKubeconfigBehavior(w, r, path)
+	case path == "/errors/kubeconfig-behaviors" && r.Method == http.MethodDelete:
+		h.handleClearKubeconfigBehaviors(w, r)
+	case strings.HasPrefix(path, "/serviceaccounts/") && strings.HasSuffix(path, "/fail") && r.Method == http.MethodPost:
+		h.handleSetServiceAccountFailure(w, r, path)
+	case path == "/errors/failing-serviceaccounts" && r.Method == http.MethodDelete:
+		h.handleClearFailingServiceAccounts(w, r)
 	case path == "/status" && r.Method == http.MethodGet:
 		h.handleStatus(w, r)
 	case path == "/kubeconfig" && r.Method == http.MethodGet:
 		h.handleKubeconfig(w, r)
+	case strings.HasPrefix(path, "/kubeconfig/serviceaccount/") && r.Method == http.MethodGet:
+		h.handleServiceAccountKubeconfig(w, r, path)
 	case path == "/healthz" && r.Method == http.MethodGet:
 		h.handleHealthz(w, r)
 	default:
@@ -278,6 +295,117 @@ func (h *ManagementHandler) handleHealthz(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// handleServiceAccountKubeconfig generates a kubeconfig using a token from the specified ServiceAccount.
+// Path: /kubeconfig/serviceaccount/{namespace}/{name}
+// Query params:
+//   - server: override the API server URL
+//   - expirationSeconds: token expiration (default: 3600)
+func (h *ManagementHandler) handleServiceAccountKubeconfig(w http.ResponseWriter, r *http.Request, path string) {
+	// Parse path: /kubeconfig/serviceaccount/{namespace}/{name}
+	path = strings.TrimPrefix(path, "/kubeconfig/serviceaccount/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 {
+		errors.WriteError(w, http.StatusBadRequest, "invalid path, expected /kubeconfig/serviceaccount/{namespace}/{name}")
+		return
+	}
+	namespace, saName := parts[0], parts[1]
+
+	// Build server URL
+	serverURL := h.serverURL
+	if r.Host != "" {
+		scheme := "https"
+		serverURL = fmt.Sprintf("%s://%s", scheme, r.Host)
+		serverURL = strings.Replace(serverURL, ":8444", ":8443", 1)
+		serverURL = strings.Replace(serverURL, ":32444", ":32443", 1)
+	}
+	if override := r.URL.Query().Get("server"); override != "" {
+		serverURL = override
+	}
+
+	// Parse expiration seconds
+	expirationSeconds := int64(3600) // Default 1 hour
+	if expStr := r.URL.Query().Get("expirationSeconds"); expStr != "" {
+		if parsed, err := strconv.ParseInt(expStr, 10, 64); err == nil && parsed > 0 {
+			expirationSeconds = parsed
+		}
+	}
+
+	// Generate the token (similar to handleTokenRequest)
+	now := time.Now()
+	expirationTime := now.Add(time.Duration(expirationSeconds) * time.Second)
+	token := generateMockJWT(namespace, saName, now, expirationTime)
+
+	// Build kubeconfig with the token
+	kubeconfig := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Config",
+		"clusters": []map[string]interface{}{
+			{
+				"name": "gardener-simulator",
+				"cluster": map[string]interface{}{
+					"server":                   serverURL,
+					"insecure-skip-tls-verify": true,
+				},
+			},
+		},
+		"users": []map[string]interface{}{
+			{
+				"name": fmt.Sprintf("%s-%s", namespace, saName),
+				"user": map[string]interface{}{
+					"token": token,
+				},
+			},
+		},
+		"contexts": []map[string]interface{}{
+			{
+				"name": "gardener-simulator",
+				"context": map[string]interface{}{
+					"cluster": "gardener-simulator",
+					"user":    fmt.Sprintf("%s-%s", namespace, saName),
+				},
+			},
+		},
+		"current-context": "gardener-simulator",
+	}
+
+	w.Header().Set("Content-Type", "application/x-yaml")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=kubeconfig-%s-%s.yaml", namespace, saName))
+
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	encoder.Encode(kubeconfig)
+}
+
+// generateMockJWT creates a mock JWT token for testing purposes
+func generateMockJWT(namespace, serviceAccount string, issuedAt, expiresAt time.Time) string {
+	// Header (base64url encoded)
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"mock-key"}`))
+
+	// Payload (base64url encoded)
+	payload := map[string]interface{}{
+		"aud": []string{"https://kubernetes.default.svc"},
+		"exp": expiresAt.Unix(),
+		"iat": issuedAt.Unix(),
+		"iss": "https://kubernetes.default.svc",
+		"kubernetes.io": map[string]interface{}{
+			"namespace": namespace,
+			"serviceaccount": map[string]string{
+				"name": serviceAccount,
+				"uid":  "mock-uid-" + serviceAccount,
+			},
+		},
+		"nbf": issuedAt.Unix(),
+		"sub": fmt.Sprintf("system:serviceaccount:%s:%s", namespace, serviceAccount),
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
+
+	// Signature (mock - just a placeholder)
+	signature := base64.RawURLEncoding.EncodeToString([]byte("mock-signature-for-testing"))
+
+	return header + "." + payloadB64 + "." + signature
+}
+
 // UpdateShootStatusRequest is the request to update shoot status
 type UpdateShootStatusRequest struct {
 	Status string `json:"status"` // Healthy, Unhealthy, Progressing, Hibernated
@@ -382,5 +510,161 @@ func (h *ManagementHandler) handleSetInvalidKubeconfig(w http.ResponseWriter, r 
 		"status":  "configured",
 		"message": fmt.Sprintf("invalid kubeconfig rate set to %.2f", req.Rate),
 		"rate":    req.Rate,
+	})
+}
+
+// SetExpiredKubeconfigRequest configures expired kubeconfig rate
+type SetExpiredKubeconfigRequest struct {
+	Rate float64 `json:"rate"` // 0.0 to 1.0
+}
+
+func (h *ManagementHandler) handleSetExpiredKubeconfig(w http.ResponseWriter, r *http.Request) {
+	var req SetExpiredKubeconfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errors.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if req.Rate < 0 || req.Rate > 1 {
+		errors.WriteError(w, http.StatusBadRequest, "rate must be between 0.0 and 1.0")
+		return
+	}
+
+	h.injector.SetExpiredKubeconfigRate(req.Rate)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "configured",
+		"message": fmt.Sprintf("expired kubeconfig rate set to %.2f", req.Rate),
+		"rate":    req.Rate,
+	})
+}
+
+// SetShortTTLRequest configures short TTL override for testing rapid refresh
+type SetShortTTLRequest struct {
+	Seconds int64 `json:"seconds"` // 0 to disable, or number of seconds
+}
+
+func (h *ManagementHandler) handleSetShortTTL(w http.ResponseWriter, r *http.Request) {
+	var req SetShortTTLRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errors.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if req.Seconds < 0 {
+		errors.WriteError(w, http.StatusBadRequest, "seconds must be >= 0")
+		return
+	}
+
+	h.injector.SetShortTTLSeconds(req.Seconds)
+
+	msg := fmt.Sprintf("short TTL override set to %d seconds", req.Seconds)
+	if req.Seconds == 0 {
+		msg = "short TTL override disabled"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "configured",
+		"message": msg,
+		"seconds": req.Seconds,
+	})
+}
+
+// SetShootKubeconfigBehaviorRequest configures per-shoot kubeconfig behavior
+type SetShootKubeconfigBehaviorRequest struct {
+	Behavior string `json:"behavior"` // "expired", "invalid", or "" to clear
+}
+
+func (h *ManagementHandler) handleSetShootKubeconfigBehavior(w http.ResponseWriter, r *http.Request, path string) {
+	// Path: /shoots/{namespace}/{name}/kubeconfig-behavior
+	path = strings.TrimPrefix(path, "/shoots/")
+	path = strings.TrimSuffix(path, "/kubeconfig-behavior")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 {
+		errors.WriteError(w, http.StatusBadRequest, "invalid path, expected /shoots/{namespace}/{name}/kubeconfig-behavior")
+		return
+	}
+	namespace, name := parts[0], parts[1]
+
+	var req SetShootKubeconfigBehaviorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errors.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	validBehaviors := map[string]bool{"": true, "expired": true, "invalid": true}
+	if !validBehaviors[req.Behavior] {
+		errors.WriteError(w, http.StatusBadRequest, "behavior must be 'expired', 'invalid', or empty string to clear")
+		return
+	}
+
+	h.injector.SetShootKubeconfigBehavior(namespace, name, req.Behavior)
+
+	msg := fmt.Sprintf("shoot %s/%s kubeconfig behavior set to '%s'", namespace, name, req.Behavior)
+	if req.Behavior == "" {
+		msg = fmt.Sprintf("shoot %s/%s kubeconfig behavior cleared", namespace, name)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "configured",
+		"message":  msg,
+		"behavior": req.Behavior,
+	})
+}
+
+func (h *ManagementHandler) handleClearKubeconfigBehaviors(w http.ResponseWriter, r *http.Request) {
+	h.injector.ClearShootKubeconfigBehaviors()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "cleared",
+		"message": "all per-shoot kubeconfig behaviors cleared",
+	})
+}
+
+// SetServiceAccountFailureRequest configures a service account to always fail TokenRequest
+type SetServiceAccountFailureRequest struct {
+	ErrorCode int `json:"errorCode"` // 0 to clear, or HTTP status code (401, 403, 404, 429, 500, etc.)
+}
+
+func (h *ManagementHandler) handleSetServiceAccountFailure(w http.ResponseWriter, r *http.Request, path string) {
+	// Parse path: /serviceaccounts/{namespace}/{name}/fail
+	path = strings.TrimPrefix(path, "/serviceaccounts/")
+	path = strings.TrimSuffix(path, "/fail")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 {
+		errors.WriteError(w, http.StatusBadRequest, "invalid path, expected /serviceaccounts/{namespace}/{name}/fail")
+		return
+	}
+	namespace, name := parts[0], parts[1]
+
+	var req SetServiceAccountFailureRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errors.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	h.injector.SetFailingServiceAccount(namespace, name, req.ErrorCode)
+
+	msg := fmt.Sprintf("serviceaccount %s/%s will now return %d errors for TokenRequest", namespace, name, req.ErrorCode)
+	if req.ErrorCode == 0 {
+		msg = fmt.Sprintf("serviceaccount %s/%s TokenRequest failure injection cleared", namespace, name)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "configured",
+		"message": msg,
+	})
+}
+
+func (h *ManagementHandler) handleClearFailingServiceAccounts(w http.ResponseWriter, r *http.Request) {
+	h.injector.ClearFailingServiceAccounts()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "cleared",
+		"message": "all per-ServiceAccount failure injections cleared",
 	})
 }
