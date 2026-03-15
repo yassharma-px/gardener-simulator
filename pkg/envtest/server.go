@@ -251,6 +251,9 @@ func (s *Server) createInitialResources(ctx context.Context) error {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      shootName,
 				Namespace: namespace,
+				Labels: map[string]string{
+					"px-backup": "test",
+				},
 			},
 			Spec: gardencorev1beta1.ShootSpec{
 				Kubernetes: gardencorev1beta1.Kubernetes{
