@@ -35,22 +35,38 @@ type Injector struct {
 
 	// Per-shoot kubeconfig behavior
 	shootKubeconfigBehavior map[string]string // namespace/name -> behavior ("expired", "invalid")
+
+	// Per-ServiceAccount kubeconfig behavior
+	serviceAccountKubeconfigBehavior map[string]string // namespace/name -> behavior ("expired", "invalid", "token_expired_error")
+
+	// Connection-level error rates
+	connectionRefusedRate float64
+	connectionResetRate   float64
+	ioTimeoutRate         float64
+
+	// Token expired error rate
+	tokenExpiredErrorRate float64
 }
 
 // NewInjector creates a new error injector
 func NewInjector(cfg types.ErrorInjectionConfig) *Injector {
 	return &Injector{
-		config:                  cfg,
-		enabled:                 cfg.Enabled,
-		errorRates:              make(map[string]float64),
-		errorCodes:              make(map[string]int),
-		latencyMs:               make(map[string]int),
-		failingShoots:           make(map[string]int),
-		failingServiceAccounts:  make(map[string]int),
-		invalidKubeconfigRate:   cfg.InvalidKubeconfigRate,
-		expiredKubeconfigRate:   cfg.ExpiredKubeconfigRate,
-		shortTTLSeconds:         cfg.ShortTTLSeconds,
-		shootKubeconfigBehavior: make(map[string]string),
+		config:                           cfg,
+		enabled:                          cfg.Enabled,
+		errorRates:                       make(map[string]float64),
+		errorCodes:                       make(map[string]int),
+		latencyMs:                        make(map[string]int),
+		failingShoots:                    make(map[string]int),
+		failingServiceAccounts:           make(map[string]int),
+		invalidKubeconfigRate:            cfg.InvalidKubeconfigRate,
+		expiredKubeconfigRate:            cfg.ExpiredKubeconfigRate,
+		shortTTLSeconds:                  cfg.ShortTTLSeconds,
+		shootKubeconfigBehavior:          make(map[string]string),
+		serviceAccountKubeconfigBehavior: make(map[string]string),
+		connectionRefusedRate:            cfg.ConnectionRefusedRate,
+		connectionResetRate:              cfg.ConnectionResetRate,
+		ioTimeoutRate:                    cfg.IOTimeoutRate,
+		tokenExpiredErrorRate:            cfg.TokenExpiredErrorRate,
 	}
 }
 
@@ -70,6 +86,10 @@ func (i *Injector) UpdateConfig(cfg types.ErrorInjectionConfig) {
 	i.invalidKubeconfigRate = cfg.InvalidKubeconfigRate
 	i.expiredKubeconfigRate = cfg.ExpiredKubeconfigRate
 	i.shortTTLSeconds = cfg.ShortTTLSeconds
+	i.connectionRefusedRate = cfg.ConnectionRefusedRate
+	i.connectionResetRate = cfg.ConnectionResetRate
+	i.ioTimeoutRate = cfg.IOTimeoutRate
+	i.tokenExpiredErrorRate = cfg.TokenExpiredErrorRate
 
 	// Copy failing shoots
 	i.failingShoots = make(map[string]int)
@@ -87,6 +107,12 @@ func (i *Injector) UpdateConfig(cfg types.ErrorInjectionConfig) {
 	i.failingServiceAccounts = make(map[string]int)
 	for k, v := range cfg.FailingServiceAccounts {
 		i.failingServiceAccounts[k] = v
+	}
+
+	// Copy service account kubeconfig behavior
+	i.serviceAccountKubeconfigBehavior = make(map[string]string)
+	for k, v := range cfg.ServiceAccountKubeconfigBehavior {
+		i.serviceAccountKubeconfigBehavior[k] = v
 	}
 }
 
@@ -242,6 +268,99 @@ func (i *Injector) ClearShootKubeconfigBehaviors() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.shootKubeconfigBehavior = make(map[string]string)
+}
+
+// SetServiceAccountKubeconfigBehavior sets specific kubeconfig behavior for a service account
+// behavior can be: "expired" (return already-expired token), "invalid" (return malformed token),
+// "token_expired_error" (return auth error with token expired message), "" (clear)
+func (i *Injector) SetServiceAccountKubeconfigBehavior(namespace, name, behavior string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	key := namespace + "/" + name
+	if behavior == "" {
+		delete(i.serviceAccountKubeconfigBehavior, key)
+	} else {
+		i.serviceAccountKubeconfigBehavior[key] = behavior
+	}
+}
+
+// GetServiceAccountKubeconfigBehavior returns the kubeconfig behavior for a specific service account
+// Returns: "expired", "invalid", "token_expired_error", or "" (normal)
+func (i *Injector) GetServiceAccountKubeconfigBehavior(namespace, name string) string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if !i.enabled {
+		return ""
+	}
+
+	key := namespace + "/" + name
+	return i.serviceAccountKubeconfigBehavior[key]
+}
+
+// ClearServiceAccountKubeconfigBehaviors removes all per-ServiceAccount kubeconfig behaviors
+func (i *Injector) ClearServiceAccountKubeconfigBehaviors() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.serviceAccountKubeconfigBehavior = make(map[string]string)
+}
+
+// ShouldInjectConnectionError checks if a connection-level error should be injected
+// Returns: (inject, errorType) where errorType is "connection refused", "connection reset", or "i/o timeout"
+func (i *Injector) ShouldInjectConnectionError() (bool, string) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if !i.enabled {
+		return false, ""
+	}
+
+	r := rand.Float64()
+	cumulative := 0.0
+
+	cumulative += i.connectionRefusedRate
+	if r < cumulative {
+		return true, "connection refused"
+	}
+
+	cumulative += i.connectionResetRate
+	if r < cumulative {
+		return true, "connection reset by peer"
+	}
+
+	cumulative += i.ioTimeoutRate
+	if r < cumulative {
+		return true, "i/o timeout"
+	}
+
+	return false, ""
+}
+
+// SetConnectionErrorRates sets the connection error injection rates
+func (i *Injector) SetConnectionErrorRates(connRefused, connReset, ioTimeout float64) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.connectionRefusedRate = connRefused
+	i.connectionResetRate = connReset
+	i.ioTimeoutRate = ioTimeout
+}
+
+// ShouldInjectTokenExpiredError checks if a "token expired" error should be injected
+func (i *Injector) ShouldInjectTokenExpiredError() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if !i.enabled || i.tokenExpiredErrorRate == 0 {
+		return false
+	}
+	return rand.Float64() < i.tokenExpiredErrorRate
+}
+
+// SetTokenExpiredErrorRate sets the rate for returning "token expired" errors
+func (i *Injector) SetTokenExpiredErrorRate(rate float64) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.tokenExpiredErrorRate = rate
 }
 
 // UpdateSimpleConfig updates the simplified error injection configuration

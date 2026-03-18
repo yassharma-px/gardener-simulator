@@ -515,9 +515,29 @@ func (h *Handler) handleTokenRequest(w http.ResponseWriter, r *http.Request) {
 	namespace := parts[0]
 	saName := parts[2]
 
-	// Check for per-ServiceAccount error injection first
+	// Check for connection-level error injection first (simulates network issues)
+	if inject, errType := h.injector.ShouldInjectConnectionError(); inject {
+		errors.WriteError(w, http.StatusServiceUnavailable, errType)
+		return
+	}
+
+	// Check for per-ServiceAccount kubeconfig behavior (takes precedence)
+	saBehavior := h.injector.GetServiceAccountKubeconfigBehavior(namespace, saName)
+	if saBehavior == "token_expired_error" {
+		// Return a 401 with "token expired" message that token_refresher.go detects
+		errors.WriteError(w, http.StatusUnauthorized, "Unauthorized: token is expired")
+		return
+	}
+
+	// Check for per-ServiceAccount error injection
 	if inject, code, msg := h.injector.ShouldInjectServiceAccountError(namespace, saName); inject {
 		errors.WriteError(w, code, msg)
+		return
+	}
+
+	// Check for random token expired error injection
+	if h.injector.ShouldInjectTokenExpiredError() {
+		errors.WriteError(w, http.StatusUnauthorized, "Unauthorized: token is expired")
 		return
 	}
 
@@ -548,10 +568,35 @@ func (h *Handler) handleTokenRequest(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	expirationTime := now.Add(time.Duration(expirationSeconds) * time.Second)
 
-	// Check for expired token injection
-	if h.injector.ShouldReturnExpiredKubeconfig() {
+	// Check per-SA kubeconfig behavior for expired tokens
+	shouldReturnExpired := saBehavior == "expired" || h.injector.ShouldReturnExpiredKubeconfig()
+	if shouldReturnExpired {
 		// Return a token that's already expired (1 hour ago)
 		expirationTime = now.Add(-1 * time.Hour)
+	}
+
+	// Check for invalid token injection
+	if saBehavior == "invalid" {
+		// Return an invalid/malformed token
+		resp := map[string]interface{}{
+			"apiVersion": "authentication.k8s.io/v1",
+			"kind":       "TokenRequest",
+			"metadata": map[string]interface{}{
+				"creationTimestamp": now.UTC().Format(time.RFC3339),
+			},
+			"spec": map[string]interface{}{
+				"audiences":         tokenReq.Spec.Audiences,
+				"expirationSeconds": expirationSeconds,
+				"boundObjectRef":    tokenReq.Spec.BoundObjectRef,
+			},
+			"status": map[string]interface{}{
+				"token":               "invalid-token-data-not-a-jwt",
+				"expirationTimestamp": expirationTime.UTC().Format(time.RFC3339),
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
 	}
 
 	// Generate a mock JWT token

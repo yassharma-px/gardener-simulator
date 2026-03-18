@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -89,6 +88,14 @@ func (h *ManagementHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSetServiceAccountFailure(w, r, path)
 	case path == "/errors/failing-serviceaccounts" && r.Method == http.MethodDelete:
 		h.handleClearFailingServiceAccounts(w, r)
+	case strings.HasPrefix(path, "/serviceaccounts/") && strings.HasSuffix(path, "/kubeconfig-behavior") && r.Method == http.MethodPost:
+		h.handleSetServiceAccountKubeconfigBehavior(w, r, path)
+	case path == "/errors/serviceaccount-kubeconfig-behaviors" && r.Method == http.MethodDelete:
+		h.handleClearServiceAccountKubeconfigBehaviors(w, r)
+	case path == "/errors/connection" && r.Method == http.MethodPost:
+		h.handleSetConnectionErrors(w, r)
+	case path == "/errors/token-expired" && r.Method == http.MethodPost:
+		h.handleSetTokenExpiredError(w, r)
 	case path == "/status" && r.Method == http.MethodGet:
 		h.handleStatus(w, r)
 	case path == "/kubeconfig" && r.Method == http.MethodGet:
@@ -376,36 +383,6 @@ func (h *ManagementHandler) handleServiceAccountKubeconfig(w http.ResponseWriter
 	encoder.Encode(kubeconfig)
 }
 
-// generateMockJWT creates a mock JWT token for testing purposes
-func generateMockJWT(namespace, serviceAccount string, issuedAt, expiresAt time.Time) string {
-	// Header (base64url encoded)
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"mock-key"}`))
-
-	// Payload (base64url encoded)
-	payload := map[string]interface{}{
-		"aud": []string{"https://kubernetes.default.svc"},
-		"exp": expiresAt.Unix(),
-		"iat": issuedAt.Unix(),
-		"iss": "https://kubernetes.default.svc",
-		"kubernetes.io": map[string]interface{}{
-			"namespace": namespace,
-			"serviceaccount": map[string]string{
-				"name": serviceAccount,
-				"uid":  "mock-uid-" + serviceAccount,
-			},
-		},
-		"nbf": issuedAt.Unix(),
-		"sub": fmt.Sprintf("system:serviceaccount:%s:%s", namespace, serviceAccount),
-	}
-	payloadJSON, _ := json.Marshal(payload)
-	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadJSON)
-
-	// Signature (mock - just a placeholder)
-	signature := base64.RawURLEncoding.EncodeToString([]byte("mock-signature-for-testing"))
-
-	return header + "." + payloadB64 + "." + signature
-}
-
 // UpdateShootStatusRequest is the request to update shoot status
 type UpdateShootStatusRequest struct {
 	Status string `json:"status"` // Healthy, Unhealthy, Progressing, Hibernated
@@ -666,5 +643,111 @@ func (h *ManagementHandler) handleClearFailingServiceAccounts(w http.ResponseWri
 	json.NewEncoder(w).Encode(map[string]string{
 		"status":  "cleared",
 		"message": "all per-ServiceAccount failure injections cleared",
+	})
+}
+
+// SetServiceAccountKubeconfigBehaviorRequest configures kubeconfig behavior for a service account
+type SetServiceAccountKubeconfigBehaviorRequest struct {
+	// Behavior: "expired" (return expired token), "invalid" (return malformed token),
+	// "token_expired_error" (return 401 with "token expired" message), "" (clear)
+	Behavior string `json:"behavior"`
+}
+
+func (h *ManagementHandler) handleSetServiceAccountKubeconfigBehavior(w http.ResponseWriter, r *http.Request, path string) {
+	// Parse path: /serviceaccounts/{namespace}/{name}/kubeconfig-behavior
+	trimmed := strings.TrimPrefix(path, "/serviceaccounts/")
+	trimmed = strings.TrimSuffix(trimmed, "/kubeconfig-behavior")
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) != 2 {
+		errors.WriteError(w, http.StatusBadRequest, "invalid path format, expected /serviceaccounts/{namespace}/{name}/kubeconfig-behavior")
+		return
+	}
+
+	namespace := parts[0]
+	name := parts[1]
+
+	var req SetServiceAccountKubeconfigBehaviorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errors.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Validate behavior
+	validBehaviors := map[string]bool{"": true, "expired": true, "invalid": true, "token_expired_error": true}
+	if !validBehaviors[req.Behavior] {
+		errors.WriteError(w, http.StatusBadRequest, "invalid behavior, must be one of: expired, invalid, token_expired_error, or empty to clear")
+		return
+	}
+
+	h.injector.SetServiceAccountKubeconfigBehavior(namespace, name, req.Behavior)
+
+	msg := fmt.Sprintf("serviceaccount %s/%s kubeconfig behavior set to '%s'", namespace, name, req.Behavior)
+	if req.Behavior == "" {
+		msg = fmt.Sprintf("serviceaccount %s/%s kubeconfig behavior cleared", namespace, name)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "configured",
+		"message": msg,
+	})
+}
+
+func (h *ManagementHandler) handleClearServiceAccountKubeconfigBehaviors(w http.ResponseWriter, r *http.Request) {
+	h.injector.ClearServiceAccountKubeconfigBehaviors()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "cleared",
+		"message": "all per-ServiceAccount kubeconfig behaviors cleared",
+	})
+}
+
+// SetConnectionErrorsRequest configures connection-level error injection
+type SetConnectionErrorsRequest struct {
+	ConnectionRefusedRate float64 `json:"connectionRefusedRate"` // Rate for "connection refused" errors
+	ConnectionResetRate   float64 `json:"connectionResetRate"`   // Rate for "connection reset" errors
+	IOTimeoutRate         float64 `json:"ioTimeoutRate"`         // Rate for "i/o timeout" errors
+}
+
+func (h *ManagementHandler) handleSetConnectionErrors(w http.ResponseWriter, r *http.Request) {
+	var req SetConnectionErrorsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errors.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	h.injector.SetConnectionErrorRates(req.ConnectionRefusedRate, req.ConnectionResetRate, req.IOTimeoutRate)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "configured",
+		"message": "connection error rates configured",
+		"config": map[string]float64{
+			"connectionRefusedRate": req.ConnectionRefusedRate,
+			"connectionResetRate":   req.ConnectionResetRate,
+			"ioTimeoutRate":         req.IOTimeoutRate,
+		},
+	})
+}
+
+// SetTokenExpiredErrorRequest configures token expired error injection
+type SetTokenExpiredErrorRequest struct {
+	Rate float64 `json:"rate"` // Rate for "token expired" errors (0.0 to 1.0)
+}
+
+func (h *ManagementHandler) handleSetTokenExpiredError(w http.ResponseWriter, r *http.Request) {
+	var req SetTokenExpiredErrorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errors.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	h.injector.SetTokenExpiredErrorRate(req.Rate)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "configured",
+		"message": fmt.Sprintf("token expired error rate set to %.2f", req.Rate),
+		"rate":    req.Rate,
 	})
 }

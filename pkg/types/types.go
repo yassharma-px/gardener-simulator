@@ -69,13 +69,21 @@ type ErrorInjectionConfig struct {
 	TokenRequestErrorRate    float64 `yaml:"tokenRequestErrorRate" json:"tokenRequestErrorRate"` // ServiceAccount TokenRequest errors
 
 	// Specific error types
-	AuthFailureRate         float64 `yaml:"authFailureRate" json:"authFailureRate"`                 // 401 errors
-	ForbiddenRate           float64 `yaml:"forbiddenRate" json:"forbiddenRate"`                     // 403 errors
-	NotFoundRate            float64 `yaml:"notFoundRate" json:"notFoundRate"`                       // 404 errors
-	ServerErrorRate         float64 `yaml:"serverErrorRate" json:"serverErrorRate"`                 // 500 errors
-	ServiceUnavailableRate  float64 `yaml:"serviceUnavailableRate" json:"serviceUnavailableRate"`   // 503 errors
-	TimeoutRate             float64 `yaml:"timeoutRate" json:"timeoutRate"`                         // 504 errors
-	RateLimitRate           float64 `yaml:"rateLimitRate" json:"rateLimitRate"`                     // 429 errors
+	AuthFailureRate        float64 `yaml:"authFailureRate" json:"authFailureRate"`               // 401 errors
+	ForbiddenRate          float64 `yaml:"forbiddenRate" json:"forbiddenRate"`                   // 403 errors
+	NotFoundRate           float64 `yaml:"notFoundRate" json:"notFoundRate"`                     // 404 errors
+	ServerErrorRate        float64 `yaml:"serverErrorRate" json:"serverErrorRate"`               // 500 errors
+	ServiceUnavailableRate float64 `yaml:"serviceUnavailableRate" json:"serviceUnavailableRate"` // 503 errors
+	TimeoutRate            float64 `yaml:"timeoutRate" json:"timeoutRate"`                       // 504 errors
+	RateLimitRate          float64 `yaml:"rateLimitRate" json:"rateLimitRate"`                   // 429 errors
+
+	// Connection-level error simulation (for testing retry logic)
+	ConnectionRefusedRate float64 `yaml:"connectionRefusedRate" json:"connectionRefusedRate"` // Simulate "connection refused"
+	ConnectionResetRate   float64 `yaml:"connectionResetRate" json:"connectionResetRate"`     // Simulate "connection reset"
+	IOTimeoutRate         float64 `yaml:"ioTimeoutRate" json:"ioTimeoutRate"`                 // Simulate "i/o timeout"
+
+	// Token expiration error simulation
+	TokenExpiredErrorRate float64 `yaml:"tokenExpiredErrorRate" json:"tokenExpiredErrorRate"` // Return "token expired" error
 
 	// Special response modes for kubeconfig testing
 	InvalidKubeconfigRate float64 `yaml:"invalidKubeconfigRate" json:"invalidKubeconfigRate"` // Return malformed kubeconfig
@@ -98,6 +106,10 @@ type ErrorInjectionConfig struct {
 
 	// Per-ServiceAccount error injection (namespace/name -> error code)
 	FailingServiceAccounts map[string]int `yaml:"failingServiceAccounts" json:"failingServiceAccounts"`
+
+	// Per-ServiceAccount kubeconfig behavior (namespace/name -> behavior)
+	// Values: "expired" (return expired token), "invalid" (return malformed token), "token_expired_error" (return auth error with token expired message)
+	ServiceAccountKubeconfigBehavior map[string]string `yaml:"serviceAccountKubeconfigBehavior" json:"serviceAccountKubeconfigBehavior"`
 }
 
 // Shoot represents a Gardener Shoot CR

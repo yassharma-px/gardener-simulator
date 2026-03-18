@@ -1,6 +1,6 @@
 module github.com/yassharma/gardener-simulator
 
-go 1.25.6
+go 1.25.5
 
 require (
 	github.com/gardener/gardener/pkg/apis v0.0.0-20260225111709-d9897865ab91
