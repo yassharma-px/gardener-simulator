@@ -37,7 +37,7 @@ type Injector struct {
 	shootKubeconfigBehavior map[string]string // namespace/name -> behavior ("expired", "invalid")
 
 	// Per-ServiceAccount kubeconfig behavior
-	serviceAccountKubeconfigBehavior map[string]string // namespace/name -> behavior ("expired", "invalid", "token_expired_error")
+	serviceAccountKubeconfigBehavior map[string]string // namespace/name -> behavior ("expired", "invalid", "token_expired_error", "restricted")
 
 	// Connection-level error rates
 	connectionRefusedRate float64
@@ -46,6 +46,9 @@ type Injector struct {
 
 	// Token expired error rate
 	tokenExpiredErrorRate float64
+
+	// Restricted service accounts - tokens from these SAs can't access shoots/projects
+	restrictedServiceAccounts map[string]bool // namespace/name -> true if restricted
 }
 
 // NewInjector creates a new error injector
@@ -67,6 +70,7 @@ func NewInjector(cfg types.ErrorInjectionConfig) *Injector {
 		connectionResetRate:              cfg.ConnectionResetRate,
 		ioTimeoutRate:                    cfg.IOTimeoutRate,
 		tokenExpiredErrorRate:            cfg.TokenExpiredErrorRate,
+		restrictedServiceAccounts:        make(map[string]bool),
 	}
 }
 
@@ -113,6 +117,12 @@ func (i *Injector) UpdateConfig(cfg types.ErrorInjectionConfig) {
 	i.serviceAccountKubeconfigBehavior = make(map[string]string)
 	for k, v := range cfg.ServiceAccountKubeconfigBehavior {
 		i.serviceAccountKubeconfigBehavior[k] = v
+	}
+
+	// Copy restricted service accounts
+	i.restrictedServiceAccounts = make(map[string]bool)
+	for k, v := range cfg.RestrictedServiceAccounts {
+		i.restrictedServiceAccounts[k] = v
 	}
 }
 
@@ -303,6 +313,50 @@ func (i *Injector) ClearServiceAccountKubeconfigBehaviors() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.serviceAccountKubeconfigBehavior = make(map[string]string)
+}
+
+// SetRestrictedServiceAccount marks a service account as having restricted permissions
+// When restricted, tokens from this SA cannot access shoots or projects
+func (i *Injector) SetRestrictedServiceAccount(namespace, name string, restricted bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	key := namespace + "/" + name
+	if restricted {
+		i.restrictedServiceAccounts[key] = true
+	} else {
+		delete(i.restrictedServiceAccounts, key)
+	}
+}
+
+// IsServiceAccountRestricted checks if a service account has restricted permissions
+func (i *Injector) IsServiceAccountRestricted(namespace, name string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	if !i.enabled {
+		return false
+	}
+
+	key := namespace + "/" + name
+	return i.restrictedServiceAccounts[key]
+}
+
+// ClearRestrictedServiceAccounts removes all restricted service account markers
+func (i *Injector) ClearRestrictedServiceAccounts() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.restrictedServiceAccounts = make(map[string]bool)
+}
+
+// GetRestrictedServiceAccounts returns a copy of the restricted service accounts map
+func (i *Injector) GetRestrictedServiceAccounts() map[string]bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	result := make(map[string]bool)
+	for k, v := range i.restrictedServiceAccounts {
+		result[k] = v
+	}
+	return result
 }
 
 // ShouldInjectConnectionError checks if a connection-level error should be injected

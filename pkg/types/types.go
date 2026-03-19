@@ -108,8 +108,12 @@ type ErrorInjectionConfig struct {
 	FailingServiceAccounts map[string]int `yaml:"failingServiceAccounts" json:"failingServiceAccounts"`
 
 	// Per-ServiceAccount kubeconfig behavior (namespace/name -> behavior)
-	// Values: "expired" (return expired token), "invalid" (return malformed token), "token_expired_error" (return auth error with token expired message)
+	// Values: "expired" (return expired token), "invalid" (return malformed token), "token_expired_error" (return auth error with token expired message), "restricted" (return valid token but deny access to shoots/projects)
 	ServiceAccountKubeconfigBehavior map[string]string `yaml:"serviceAccountKubeconfigBehavior" json:"serviceAccountKubeconfigBehavior"`
+
+	// Restricted ServiceAccounts - tokens from these SAs will be denied access to shoots and projects
+	// This simulates tokens with insufficient permissions
+	RestrictedServiceAccounts map[string]bool `yaml:"restrictedServiceAccounts" json:"restrictedServiceAccounts"`
 }
 
 // Shoot represents a Gardener Shoot CR

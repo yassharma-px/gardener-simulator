@@ -96,6 +96,12 @@ func (h *ManagementHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleSetConnectionErrors(w, r)
 	case path == "/errors/token-expired" && r.Method == http.MethodPost:
 		h.handleSetTokenExpiredError(w, r)
+	case strings.HasPrefix(path, "/serviceaccounts/") && strings.HasSuffix(path, "/restricted") && r.Method == http.MethodPost:
+		h.handleSetServiceAccountRestricted(w, r, path)
+	case path == "/errors/restricted-serviceaccounts" && r.Method == http.MethodDelete:
+		h.handleClearRestrictedServiceAccounts(w, r)
+	case path == "/errors/restricted-serviceaccounts" && r.Method == http.MethodGet:
+		h.handleGetRestrictedServiceAccounts(w, r)
 	case path == "/status" && r.Method == http.MethodGet:
 		h.handleStatus(w, r)
 	case path == "/kubeconfig" && r.Method == http.MethodGet:
@@ -749,5 +755,63 @@ func (h *ManagementHandler) handleSetTokenExpiredError(w http.ResponseWriter, r 
 		"status":  "configured",
 		"message": fmt.Sprintf("token expired error rate set to %.2f", req.Rate),
 		"rate":    req.Rate,
+	})
+}
+
+// SetServiceAccountRestrictedRequest configures restricted access for a service account
+type SetServiceAccountRestrictedRequest struct {
+	Restricted bool `json:"restricted"` // true to restrict, false to unrestrict
+}
+
+func (h *ManagementHandler) handleSetServiceAccountRestricted(w http.ResponseWriter, r *http.Request, path string) {
+	// Path: /serviceaccounts/{namespace}/{name}/restricted
+	path = strings.TrimPrefix(path, "/serviceaccounts/")
+	path = strings.TrimSuffix(path, "/restricted")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 {
+		errors.WriteError(w, http.StatusBadRequest, "invalid path, expected /serviceaccounts/{namespace}/{name}/restricted")
+		return
+	}
+	namespace, name := parts[0], parts[1]
+
+	var req SetServiceAccountRestrictedRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errors.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	h.injector.SetRestrictedServiceAccount(namespace, name, req.Restricted)
+
+	msg := fmt.Sprintf("serviceaccount %s/%s is now restricted", namespace, name)
+	if !req.Restricted {
+		msg = fmt.Sprintf("serviceaccount %s/%s restriction removed", namespace, name)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "configured",
+		"message":    msg,
+		"namespace":  namespace,
+		"name":       name,
+		"restricted": req.Restricted,
+	})
+}
+
+func (h *ManagementHandler) handleClearRestrictedServiceAccounts(w http.ResponseWriter, r *http.Request) {
+	h.injector.ClearRestrictedServiceAccounts()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "cleared",
+		"message": "all restricted service account markers cleared",
+	})
+}
+
+func (h *ManagementHandler) handleGetRestrictedServiceAccounts(w http.ResponseWriter, r *http.Request) {
+	restricted := h.injector.GetRestrictedServiceAccounts()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"restrictedServiceAccounts": restricted,
 	})
 }

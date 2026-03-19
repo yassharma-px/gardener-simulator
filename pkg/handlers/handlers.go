@@ -106,6 +106,14 @@ func (h *Handler) handleNamespacedResource(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *Handler) handleListShoots(w http.ResponseWriter, r *http.Request, namespace string) {
+	// Check if token is from a restricted service account
+	if ns, name, ok := extractServiceAccountFromAuth(r); ok {
+		if h.injector.IsServiceAccountRestricted(ns, name) {
+			errors.WriteError(w, http.StatusForbidden, "Forbidden: insufficient permissions to list shoots")
+			return
+		}
+	}
+
 	if inject, code, msg := h.injector.ShouldInjectError("ListShoots"); inject {
 		errors.WriteError(w, code, msg)
 		return
@@ -129,6 +137,14 @@ func (h *Handler) handleListAllShoots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if token is from a restricted service account
+	if ns, name, ok := extractServiceAccountFromAuth(r); ok {
+		if h.injector.IsServiceAccountRestricted(ns, name) {
+			errors.WriteError(w, http.StatusForbidden, "Forbidden: insufficient permissions to list shoots")
+			return
+		}
+	}
+
 	if inject, code, msg := h.injector.ShouldInjectError("ListShoots"); inject {
 		errors.WriteError(w, code, msg)
 		return
@@ -146,6 +162,14 @@ func (h *Handler) handleListAllShoots(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGetShoot(w http.ResponseWriter, r *http.Request, namespace, name string) {
+	// Check if token is from a restricted service account
+	if ns, saName, ok := extractServiceAccountFromAuth(r); ok {
+		if h.injector.IsServiceAccountRestricted(ns, saName) {
+			errors.WriteError(w, http.StatusForbidden, "Forbidden: insufficient permissions to get shoot")
+			return
+		}
+	}
+
 	// Check per-shoot error injection first
 	if inject, code, msg := h.injector.ShouldInjectShootError(namespace, name); inject {
 		errors.WriteError(w, code, msg)
@@ -386,6 +410,14 @@ func (h *Handler) handleProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	// Check if token is from a restricted service account
+	if ns, name, ok := extractServiceAccountFromAuth(r); ok {
+		if h.injector.IsServiceAccountRestricted(ns, name) {
+			errors.WriteError(w, http.StatusForbidden, "Forbidden: insufficient permissions to list projects")
+			return
+		}
+	}
+
 	projects := h.store.ListProjects()
 
 	items := make([]map[string]interface{}, 0, len(projects))
@@ -428,6 +460,14 @@ func (h *Handler) handleListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGetProject(w http.ResponseWriter, r *http.Request, name string) {
+	// Check if token is from a restricted service account
+	if ns, saName, ok := extractServiceAccountFromAuth(r); ok {
+		if h.injector.IsServiceAccountRestricted(ns, saName) {
+			errors.WriteError(w, http.StatusForbidden, "Forbidden: insufficient permissions to get project")
+			return
+		}
+	}
+
 	project, err := h.store.GetProject(name)
 	if err != nil {
 		errors.WriteError(w, http.StatusNotFound, err.Error())
@@ -622,6 +662,60 @@ func (h *Handler) handleTokenRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// extractServiceAccountFromAuth extracts namespace and service account name from Authorization header
+// Returns (namespace, name, ok) - ok is false if extraction fails
+func extractServiceAccountFromAuth(r *http.Request) (string, string, bool) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return "", "", false
+	}
+
+	// Expect "Bearer <token>"
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return "", "", false
+	}
+
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", "", false
+	}
+
+	// Decode the payload (second part)
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		// Try with standard encoding
+		payloadBytes, err = base64.URLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return "", "", false
+		}
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return "", "", false
+	}
+
+	// Extract from kubernetes.io claim
+	k8sInfo, ok := payload["kubernetes.io"].(map[string]interface{})
+	if !ok {
+		return "", "", false
+	}
+
+	namespace, _ := k8sInfo["namespace"].(string)
+	saInfo, ok := k8sInfo["serviceaccount"].(map[string]interface{})
+	if !ok {
+		return "", "", false
+	}
+
+	saName, _ := saInfo["name"].(string)
+	if namespace == "" || saName == "" {
+		return "", "", false
+	}
+
+	return namespace, saName, true
 }
 
 // generateMockJWT creates a mock JWT token for testing purposes
