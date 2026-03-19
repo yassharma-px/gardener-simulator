@@ -54,14 +54,25 @@ type ErrorConfig struct {
 	rateLimitRate            float64
 	adminKubeconfigErrorRate float64
 	tokenRequestErrorRate    float64
-	failingShoots            map[string]int    // namespace/name -> error code
-	failingServiceAccounts   map[string]int    // namespace/name -> error code
+	failingShoots            map[string]int // namespace/name -> error code
+	failingServiceAccounts   map[string]int // namespace/name -> error code
 
 	// Kubeconfig injection settings
 	invalidKubeconfigRate   float64
 	expiredKubeconfigRate   float64
 	shortTTLSeconds         int64
 	shootKubeconfigBehavior map[string]string // namespace/name -> behavior ("expired", "invalid")
+
+	// Connection error injection
+	connectionRefusedRate float64
+	connectionResetRate   float64
+	ioTimeoutRate         float64
+
+	// Token expired error injection
+	tokenExpiredRate float64
+
+	// Restricted service accounts (get 403 on shoots/projects)
+	restrictedServiceAccounts map[string]bool // namespace/name -> true
 }
 
 // Server is an envtest-based server that uses real Gardener CRDs.
@@ -81,9 +92,10 @@ func NewServer(config *types.SimulatorConfig) *Server {
 		config: config,
 		stopCh: make(chan struct{}),
 		errorConfig: &ErrorConfig{
-			failingShoots:           make(map[string]int),
-			failingServiceAccounts:  make(map[string]int),
-			shootKubeconfigBehavior: make(map[string]string),
+			failingShoots:             make(map[string]int),
+			failingServiceAccounts:    make(map[string]int),
+			shootKubeconfigBehavior:   make(map[string]string),
+			restrictedServiceAccounts: make(map[string]bool),
 		},
 	}
 }
@@ -387,7 +399,7 @@ func (s *Server) startProxy(ctx context.Context) {
 	}
 
 	// Wrap with handlers, then error injection
-	handler := s.errorInjectionMiddleware(s.tokenRequestMiddleware(s.adminKubeconfigMiddleware(proxy)))
+	handler := s.errorInjectionMiddleware(s.restrictedServiceAccountMiddleware(s.tokenRequestMiddleware(s.adminKubeconfigMiddleware(proxy))))
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -544,6 +556,92 @@ func (s *Server) adminKubeconfigMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// restrictedServiceAccountMiddleware checks if the request is from a restricted SA
+// and returns 403 Forbidden for shoots and projects endpoints.
+var shootsProjectsPattern = regexp.MustCompile(`^/apis/core\.gardener\.cloud/v1beta1/(shoots|namespaces/[^/]+/shoots|projects)`)
+
+func (s *Server) restrictedServiceAccountMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if this is a shoots or projects request
+		if !shootsProjectsPattern.MatchString(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check if error injection is enabled
+		s.errorConfig.mu.RLock()
+		enabled := s.errorConfig.enabled
+		restrictedSAs := s.errorConfig.restrictedServiceAccounts
+		s.errorConfig.mu.RUnlock()
+
+		if !enabled || len(restrictedSAs) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Extract SA identity from Authorization header
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		saKey := s.extractServiceAccountFromToken(token)
+		if saKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Check if SA is restricted
+		s.errorConfig.mu.RLock()
+		isRestricted := restrictedSAs[saKey]
+		s.errorConfig.mu.RUnlock()
+
+		if isRestricted {
+			s.writeErrorResponse(w, http.StatusForbidden, "Forbidden: insufficient permissions to access shoots/projects")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// extractServiceAccountFromToken extracts the SA namespace/name from a JWT token
+func (s *Server) extractServiceAccountFromToken(token string) string {
+	// JWT format: header.payload.signature
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+
+	// Decode payload (second part)
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+
+	// Subject format: system:serviceaccount:namespace:name
+	if !strings.HasPrefix(claims.Sub, "system:serviceaccount:") {
+		return ""
+	}
+
+	// Extract namespace/name
+	saParts := strings.Split(strings.TrimPrefix(claims.Sub, "system:serviceaccount:"), ":")
+	if len(saParts) != 2 {
+		return ""
+	}
+
+	return saParts[0] + "/" + saParts[1]
 }
 
 // handleAdminKubeconfigRequest handles the AdminKubeconfigRequest subresource.
@@ -753,11 +851,18 @@ func (s *Server) handleTokenRequest(w http.ResponseWriter, r *http.Request, name
 	timeoutRate := s.errorConfig.timeoutRate
 	expiredKubeconfigRate := s.errorConfig.expiredKubeconfigRate
 	shortTTLSeconds := s.errorConfig.shortTTLSeconds
+	tokenExpiredRate := s.errorConfig.tokenExpiredRate
 	s.errorConfig.mu.RUnlock()
 
 	// Return specific error for failing service accounts
 	if hasFail && failCode != 0 {
 		s.writeErrorResponse(w, failCode, fmt.Sprintf("%s: serviceaccount %s/%s", http.StatusText(failCode), namespace, saName))
+		return
+	}
+
+	// Check for token expired error injection (401 with "token is expired" message)
+	if enabled && tokenExpiredRate > 0 && mrand.Float64() < tokenExpiredRate {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Unauthorized: token is expired")
 		return
 	}
 
@@ -898,11 +1003,15 @@ func (s *Server) startManagementAPI(port int) {
 	mux.HandleFunc("/management/errors/expired-kubeconfig", s.handleSetExpiredKubeconfig)
 	mux.HandleFunc("/management/errors/short-ttl", s.handleSetShortTTL)
 	mux.HandleFunc("/management/errors/kubeconfig-behaviors", s.handleClearKubeconfigBehaviors)
+	mux.HandleFunc("/management/errors/connection", s.handleSetConnectionErrors)
+	mux.HandleFunc("/management/errors/token-expired", s.handleSetTokenExpiredError)
+	mux.HandleFunc("/management/errors/restricted-serviceaccounts", s.handleRestrictedServiceAccounts)
 	mux.HandleFunc("/management/shoots/", s.handleShootEndpoints)
 	mux.HandleFunc("/management/serviceaccounts/", s.handleServiceAccountEndpoints)
 	mux.HandleFunc("/management/kubeconfig", s.handleKubeconfig)
 	mux.HandleFunc("/management/kubeconfig/serviceaccount/", s.handleServiceAccountKubeconfig)
 	mux.HandleFunc("/management/healthz", s.handleHealthz)
+	mux.HandleFunc("/management/status", s.handleStatus)
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
@@ -1414,6 +1523,52 @@ func (s *Server) handleServiceAccountEndpoints(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	if strings.HasSuffix(path, "/restricted") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		path = strings.TrimSuffix(path, "/restricted")
+		parts := strings.Split(path, "/")
+		if len(parts) != 2 {
+			http.Error(w, "invalid path, expected /management/serviceaccounts/{namespace}/{name}/restricted", http.StatusBadRequest)
+			return
+		}
+		namespace, name := parts[0], parts[1]
+
+		var req struct {
+			Restricted bool `json:"restricted"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		s.errorConfig.mu.Lock()
+		key := namespace + "/" + name
+		if req.Restricted {
+			s.errorConfig.restrictedServiceAccounts[key] = true
+		} else {
+			delete(s.errorConfig.restrictedServiceAccounts, key)
+		}
+		s.errorConfig.mu.Unlock()
+
+		msg := fmt.Sprintf("serviceaccount %s/%s is now restricted (403 on shoots/projects)", namespace, name)
+		if !req.Restricted {
+			msg = fmt.Sprintf("serviceaccount %s/%s restriction cleared", namespace, name)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":     "configured",
+			"message":    msg,
+			"namespace":  namespace,
+			"name":       name,
+			"restricted": req.Restricted,
+		})
+		return
+	}
+
 	http.Error(w, "endpoint not found", http.StatusNotFound)
 }
 
@@ -1497,4 +1652,121 @@ users:
 
 func base64Encode(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
+}
+
+// handleSetConnectionErrors sets connection error rates
+func (s *Server) handleSetConnectionErrors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		ConnectionRefusedRate float64 `json:"connectionRefusedRate"`
+		ConnectionResetRate   float64 `json:"connectionResetRate"`
+		IOTimeoutRate         float64 `json:"ioTimeoutRate"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.errorConfig.mu.Lock()
+	s.errorConfig.connectionRefusedRate = req.ConnectionRefusedRate
+	s.errorConfig.connectionResetRate = req.ConnectionResetRate
+	s.errorConfig.ioTimeoutRate = req.IOTimeoutRate
+	s.errorConfig.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":                "configured",
+		"connectionRefusedRate": req.ConnectionRefusedRate,
+		"connectionResetRate":   req.ConnectionResetRate,
+		"ioTimeoutRate":         req.IOTimeoutRate,
+	})
+}
+
+// handleSetTokenExpiredError sets token expired error rate
+func (s *Server) handleSetTokenExpiredError(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Rate float64 `json:"rate"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.errorConfig.mu.Lock()
+	s.errorConfig.tokenExpiredRate = req.Rate
+	s.errorConfig.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "configured",
+		"rate":   req.Rate,
+	})
+}
+
+// handleRestrictedServiceAccounts handles GET and DELETE for restricted SAs
+func (s *Server) handleRestrictedServiceAccounts(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.errorConfig.mu.RLock()
+		restricted := make([]string, 0, len(s.errorConfig.restrictedServiceAccounts))
+		for k := range s.errorConfig.restrictedServiceAccounts {
+			restricted = append(restricted, k)
+		}
+		s.errorConfig.mu.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"restrictedServiceAccounts": restricted,
+		})
+
+	case http.MethodDelete:
+		s.errorConfig.mu.Lock()
+		s.errorConfig.restrictedServiceAccounts = make(map[string]bool)
+		s.errorConfig.mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "cleared",
+			"message": "all restricted service account markers cleared",
+		})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleStatus returns the current simulator status
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.errorConfig.mu.RLock()
+	status := map[string]interface{}{
+		"status": "running",
+		"simulator": map[string]interface{}{
+			"version": "1.0.0",
+		},
+		"errorInjection": map[string]interface{}{
+			"enabled":               s.errorConfig.enabled,
+			"connectionRefusedRate": s.errorConfig.connectionRefusedRate,
+			"connectionResetRate":   s.errorConfig.connectionResetRate,
+			"ioTimeoutRate":         s.errorConfig.ioTimeoutRate,
+			"tokenExpiredRate":      s.errorConfig.tokenExpiredRate,
+		},
+	}
+	s.errorConfig.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
