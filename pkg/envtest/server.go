@@ -17,6 +17,7 @@ import (
 	"log"
 	"math/big"
 	mrand "math/rand"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -264,7 +265,7 @@ func (s *Server) createInitialResources(ctx context.Context) error {
 				Name:      shootName,
 				Namespace: namespace,
 				Labels: map[string]string{
-					"px-backup": "test",
+					"px-backup_allotment": "test",
 				},
 			},
 			Spec: gardencorev1beta1.ShootSpec{
@@ -424,13 +425,64 @@ func (s *Server) startProxy(ctx context.Context) {
 func (s *Server) errorInjectionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.errorConfig.mu.RLock()
+		enabled := s.errorConfig.enabled
 		unauthorizedRate := s.errorConfig.unauthorizedRate
 		forbiddenRate := s.errorConfig.forbiddenRate
 		notFoundRate := s.errorConfig.notFoundRate
 		serverErrorRate := s.errorConfig.serverErrorRate
 		timeoutRate := s.errorConfig.timeoutRate
 		rateLimitRate := s.errorConfig.rateLimitRate
+		connectionRefusedRate := s.errorConfig.connectionRefusedRate
+		connectionResetRate := s.errorConfig.connectionResetRate
+		ioTimeoutRate := s.errorConfig.ioTimeoutRate
 		s.errorConfig.mu.RUnlock()
+
+		// Only inject errors if enabled
+		if enabled {
+			// Check connection-level errors first (simulate by closing connection)
+			if connectionRefusedRate > 0 && mrand.Float64() < connectionRefusedRate {
+				// Simulate connection refused by hijacking and closing connection
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						conn.Close()
+						return
+					}
+				}
+				// Fallback: return 503 Service Unavailable
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "connection refused")
+				return
+			}
+
+			if connectionResetRate > 0 && mrand.Float64() < connectionResetRate {
+				// Simulate connection reset by hijacking and closing connection abruptly
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						// Set linger to 0 to send RST instead of FIN
+						if tcpConn, ok := conn.(*net.TCPConn); ok {
+							tcpConn.SetLinger(0)
+						}
+						conn.Close()
+						return
+					}
+				}
+				// Fallback: return 502 Bad Gateway
+				s.writeErrorResponse(w, http.StatusBadGateway, "connection reset by peer")
+				return
+			}
+
+			if ioTimeoutRate > 0 && mrand.Float64() < ioTimeoutRate {
+				// Simulate I/O timeout by sleeping then closing
+				time.Sleep(30 * time.Second)
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						conn.Close()
+						return
+					}
+				}
+				s.writeErrorResponse(w, http.StatusGatewayTimeout, "i/o timeout")
+				return
+			}
+		}
 
 		// Check each error type in order
 		r2 := mrand.Float64()
@@ -697,7 +749,7 @@ func (s *Server) handleAdminKubeconfigRequest(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	expiration := int64(240) // Default 4 minutes
+	expiration := int64(86400) // Default 1 day
 	if req.Spec.ExpirationSeconds != nil {
 		log.Printf("Expiration seconds: %d", *req.Spec.ExpirationSeconds)
 		expiration = *req.Spec.ExpirationSeconds

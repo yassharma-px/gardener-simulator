@@ -98,7 +98,7 @@ func generateDefaultConfig(numProjects, numShoots int) *types.SimulatorConfig {
 				CloudType: cloudTypes[s%len(cloudTypes)],
 				Status:    types.ShootStatusHealthy,
 				Labels: map[string]string{
-					"px-backup": "test",
+					"px-backup_allotment": "test",
 				},
 			}
 			project.Shoots = append(project.Shoots, shoot)
